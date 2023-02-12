@@ -1,0 +1,53 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "atomkern"
+version = "0.1.0"
+edition="2021"
+rustflags = [
+    "-C", "link-arg=-Wl,--verbose" # -fuse-ld=lld",
+]
+# forced-target = "kernel/x64.json"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+bootloader_api = "0.11"
+volatile = "0.2.6"
+spin = "0.5.2"
+x86_64 = "0.14.10"
+proc-bitfield = "0.2.2"
+
+[dependencies.num_enum]
+version = "0.5.9"
+default-features = false
+
+[dependencies.arrayvec]
+version = "0.7.2"
+default-features = false
+
+[dependencies.lazy_static]
+version = "1.0"
+features = ["spin_no_std"]
+
+[dependencies.bitvec]
+version = "1"
+default-features = false
+# features = ["atomic", "alloc"]
+
+[dependencies.nom]
+version = "7"
+default-features = false
+
+[build-dependencies]
+nasm-rs = "0.2.4"
+cc = "1.0"
+# [package.metadata.bootloader]
+# # map-framebuffer = false
+
+[patch.crates-io]
+api_bootloader = { path = "../bootloader/api" }
