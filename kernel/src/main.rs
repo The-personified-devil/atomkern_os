@@ -25,7 +25,7 @@ use core::convert::TryInto;
 
 use mm::phys::frame;
 use mm::phys::{Alloc, Allocator, PageRange};
-use mm::virt::active_page_table;
+use mm::virt::*;
 use x86_64::{
     registers,
     structures::paging::{PageTable, PageTableFlags},
@@ -245,7 +245,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     iter_table(page_table, 0, &mut first_page);
 
-    interrupt::init(
+    interrupt::init(allocator,
         boot_info.rsdp_addr.into_option().unwrap(),
         x86_64::registers::control::Cr3::read()
             .0

@@ -124,7 +124,7 @@ SwitchToLongMode:
     lidt [IDT]                        ; Load a zero length IDT so that any NMI causes a triple fault.
  
     ; Enter long mode.
-    mov eax, 10100000b                ; Set the PAE and PGE bit.
+    mov eax, 1101000b                ; Set the PAE and PGE bit.
     mov cr4, eax
  
     ; mov edi, [0xFF8]
@@ -135,7 +135,7 @@ SwitchToLongMode:
     mov ecx, 0xC0000080               ; Read from the EFER MSR. 
     rdmsr    
  
-    or eax, 0x00000100                ; Set the LME bit.
+    or eax, 0b100100000000                ; Set the LME bit.
     wrmsr
  
     mov eax, cr0                      ; Activate long mode -
@@ -204,4 +204,14 @@ LongMode:
 ; Loop: 
 ;     ; jmp Main.Long
 ;     jmp Loop
+
+    mov ecx, 0xC0000080               ; Read from the EFER MSR. 
+    rdmsr    
+ 
+    or eax, 0x100000000000                ; Set the LME bit.
+    wrmsr
+
+    mov rax, [0xFF0]
+    mov rsp, rax
+    ; mov rbp, rax
     jmp [0xFF8]

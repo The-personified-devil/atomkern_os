@@ -162,7 +162,7 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     //         (length as usize - core::mem::size_of::<SystemDescriptionHeader>()) / 8,
     //     )
     // };
-    let mut tables = ArrayVec::<_, 24>::new();
+    let mut tables = ArrayVec::<_, 100>::new();
     for offset in (0..length as usize - core::mem::size_of::<SystemDescriptionHeader>()).step_by(8)
     {
         let addr = unsafe {
@@ -187,7 +187,7 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     let data = unsafe {
         slice::from_raw_parts(
             core::ptr::addr_of!(apic.data).byte_offset(8isize) as *const u8,
-            (apic.length + 0) as usize,
+            (apic.length as usize) - core::mem::size_of::<SystemDescriptionHeader>(),
         )
     };
     println!("{:?}", data);
@@ -275,11 +275,11 @@ fn parse(input: &[u8]) -> IResult<&[u8], X2Apic> {
     }
 }
 
-extern "C" fn ap_init()  -> !{
+extern "C" fn ap_init() -> ! {
     ap_init_rs();
 }
 
-fn ap_init_rs() -> !{
+fn ap_init_rs() -> ! {
     let mut idt = InterruptDescriptorTable::new();
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.divide_error.set_handler_fn(error);
@@ -301,11 +301,40 @@ fn ap_init_rs() -> !{
     unsafe {
         idt.load_unsafe();
     }
+    let mut a: u64 = 15000000;
+    while a > 0 {
+        a -= 1;
+        unsafe {
+        asm!("pause");
+        }
+    }
     println!("lmao");
-    loop  {}
+    println!("lmao");
+    loop {}
 }
 
-pub fn init(rdsp_addr: u64, page_addr: u64) {
+pub fn alloc_stack(allocator: &mut crate::frame::Allocator, idx: usize) -> u64 {
+    let base = 0x30000000000;
+
+    let mut i = 0;
+    while i < 0x2000 {
+        i += 1;
+        let frame = allocator.allocate().unwrap();
+        // println!("{}, {}, {}", base, idx * 0x2000000 , i * 0x1000);
+        // println!("{}", (base + idx * 0x3000000 + i * 0x1000));
+            // println!("{:?}", x86_64::VirtAddr::try_new((base + idx * 0x2000000 + i * 0x1000) as u64));
+        crate::map_page(
+            allocator,
+            x86_64::VirtAddr::new((base + idx * 0x2000000 + i * 0x1000) as u64),
+            frame,
+        );
+        // println!("eyo wtf");
+    }
+
+    (base + (idx + 1) * 0x2000000) as u64
+}
+
+pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: u64) {
     let apics = acpi(rdsp_addr);
     // TODO: Make static, this shit lives shorter than ur mom
 
@@ -409,15 +438,17 @@ pub fn init(rdsp_addr: u64, page_addr: u64) {
         );
     }
     unsafe {
-            let value: u64;
-            asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
-            println!("{}", value);
-        (crate::PHYS_OFFSET+ 0xFF8 as u64).as_mut_ptr::<extern "C" fn () -> !>().write(ap_init);
+        (crate::PHYS_OFFSET + 0xFF8 as u64)
+            .as_mut_ptr::<extern "C" fn() -> !>()
+            .write(ap_init);
     }
     println!("{:?}", x86_64::registers::control::Cr3::read());
     let mut ipi = Msr::new(0x830);
     // TODO: Parse ACPI
     for apic in apics.iter().skip(1) {
+        if apic.apic_id > 100 {
+            continue;
+        }
         let mut init = InterprocessInterrupt(0)
             .with_message_type(MessageType::Init)
             .with_level(true)
@@ -436,6 +467,12 @@ pub fn init(rdsp_addr: u64, page_addr: u64) {
             .with_vec(0);
 
         unsafe {
+            println!("alloc stack");
+            let stack_addr = alloc_stack(allocator, apic.apic_id as usize);
+            (crate::PHYS_OFFSET + 0xFF0 as u64)
+                .as_mut_ptr::<u64>()
+                .write(stack_addr);
+            println!("after");
             // (0xFF8 as *mut u64).write(stack)
             error_reg.write(0);
             // base.byte_add(0x280).write(0);
@@ -453,11 +490,13 @@ pub fn init(rdsp_addr: u64, page_addr: u64) {
             // (base.byte_add(0x310) as *mut u32).write_volatile((init2.0 >> 32) as u32 );
             // (base.byte_add(0x300) as *mut u32).write_volatile(init2.0 as u32);
             ipi.write(init2.into());
+            println!("first_cycle");
             let mut a: u64 = 15000000;
             while a > 0 {
                 a -= 1;
                 asm!("pause");
             }
+            println!("no pause");
             error_reg.write(0);
             // base.byte_add(0x280).write(0);
             // println!("{:?}", InterprocessInterrupt((base.byte_add(0x300) as *mut u32).read_volatile() as u64));
@@ -465,12 +504,13 @@ pub fn init(rdsp_addr: u64, page_addr: u64) {
             // (base.byte_add(0x310) as *mut u32).write_volatile((startup.0 >> 32) as u32 );
             // (base.byte_add(0x300) as *mut u32).write_volatile(startup.0 as u32);
             ipi.write(startup.into());
+            println!("second cycle");
             let mut a: u64 = 15000000;
             while a > 0 {
                 a -= 1;
                 asm!("pause");
             }
-            loop {}
+            println!("lmao");
         }
     }
     loop {}

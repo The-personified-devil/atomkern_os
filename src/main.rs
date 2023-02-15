@@ -10,7 +10,7 @@ fn main() {
     if uefi {
         cmd.arg("-bios").arg("/usr/share/ovmf/x64/OVMF.fd"); //ovmf_prebuilt::ovmf_pure_efi());
         cmd.arg("-s").arg("-S");
-        cmd.arg("-m").arg("32G");
+        cmd.arg("-m").arg("8G");
         cmd.arg("-d").arg("all");
         cmd.arg("-D").arg("qemulog%d");
         cmd.arg("-no-shutdown");

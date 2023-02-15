@@ -48,7 +48,7 @@ impl<'a> Allocator<'a> {
             .enumerate()
             .find_map(|(i, bit)| (!*bit).then_some(i))
             .unwrap();
-        println!("1G page index: {}", index_1g);
+        // println!("1G page index: {}", index_1g);
 
         let offset_2m = index_1g * 512;
         let index_2m = offset_2m
@@ -57,7 +57,7 @@ impl<'a> Allocator<'a> {
                 .enumerate()
                 .find_map(|(i, bit)| (!*bit).then_some(i))
                 .unwrap();
-        println!("2M page index: {}", index_2m);
+        // println!("2M page index: {}", index_2m);
 
         let offset_4k = index_2m * 512;
         let index_4k = offset_4k
@@ -66,7 +66,7 @@ impl<'a> Allocator<'a> {
                 .enumerate()
                 .find_map(|(i, bit)| (!*bit).then_some(i))
                 .unwrap();
-        println!("4K page index: {}", index_4k);
+        // println!("4K page index: {}", index_4k);
 
         self.map_4K.set(index_4k, true);
 
