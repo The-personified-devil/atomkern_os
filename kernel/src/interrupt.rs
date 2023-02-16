@@ -85,17 +85,121 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 extern "x86-interrupt" fn error(_: InterruptStackFrame) {
-    // println!("Startup lmao");
     loop {}
 }
 extern "x86-interrupt" fn gpf(_: InterruptStackFrame, id: u64) {
-    // println!("General protection fault with id: {}", id);
+    println!("General protection fault with id: {}", id);
     loop {}
 }
 
 extern "x86-interrupt" fn div(_: InterruptStackFrame, id: u64) -> ! {
     // println!("General protection fault with id: {}", id);
     loop {}
+}
+
+#[no_mangle]
+static mut REGS: crate::proc::Registers = crate::proc::Registers {
+    rax: 0,
+    rbx: 0,
+    rcx: 0,
+    rdx: 0,
+    rsi: 0,
+    rdi: 0,
+    r8: 0,
+    r9: 0,
+    r10: 0,
+    r11: 0,
+    r12: 0,
+    r13: 0,
+    r14: 0,
+    r15: 0,
+};
+
+extern "x86-interrupt" fn timer_int(_: InterruptStackFrame) {
+    unsafe {
+        asm!(r#"mov {x}, rax
+              mov  {x}+8,   rbx
+              mov  {x}+16,  rcx
+              mov  {x}+24,  rdx
+              mov  {x}+32,  rsi
+              mov  {x}+40,  rdi
+              mov {x}+48,   r8
+              mov {x}+56,   r9
+              mov  {x}+64,  r10
+              mov  {x}+72,  r11
+              mov  {x}+80,  r12
+              mov  {x}+88,  r13
+              mov  {x}+96,  r14
+              mov  {x}+104, r15
+        "#, x = sym REGS);
+    }
+
+    println!("Timer interrupt");
+    println!("{:?}", unsafe { REGS });
+
+    let mut eoi = Msr::new(0x80B);
+    unsafe {
+        eoi.write(0);
+        asm!(r#"mov rax, {x}
+              mov rbx, {x}+8
+              mov rcx, {x}+16
+              mov rdx, {x}+24
+              mov rsi, {x}+32
+              mov rdi, {x}+40
+              mov r8, {x}+48
+              mov r9, {x}+56
+              mov r10, {x}+64
+              mov r11, {x}+72
+              mov r12, {x}+80
+              mov r13, {x}+88
+              mov r14, {x}+96
+              mov r15, {x}+104
+        "#, x = sym REGS);
+    }
+}
+
+static PROCS: spin::Mutex<Option<ArrayVec<crate::proc::Process, 2>>> = spin::Mutex::new(None);
+
+#[no_mangle]
+static mut PROC: crate::proc::Process = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+
+static CURPROC: spin::Mutex<u64> = spin::Mutex::new(0);
+
+#[no_mangle]
+extern "C" fn determine_next_proc() {
+    let mut binding = PROCS.lock();
+    let procs = binding.as_mut().unwrap();
+    let rflags = procs[0].rflags;
+    let rsp = procs[0].rsp;
+    let proc = &mut procs[*CURPROC.lock() as usize];
+    let mut cur = CURPROC.lock();
+    unsafe {
+        if *cur == 1 {
+            PROC.rflags = rflags;
+            PROC.rsp = rsp;
+        }
+        *proc = PROC;
+        proc.regs = REGS;
+    }
+
+    let proc = match *cur {
+        0 => {
+            *cur = 1;
+            procs[1]
+        }
+        1 => {
+            *cur = 0;
+            procs[0]
+        }
+        _ => unreachable!(),
+    };
+
+    println!("determine_next_proc");
+
+    unsafe {
+        REGS = proc.regs;
+        PROC = proc;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -150,9 +254,9 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     fn check_signature(ptr: *const SystemDescriptionHeader) {
         let header = unsafe { &*ptr };
         let length = unsafe { core::ptr::addr_of!(header.length).read_unaligned() };
-        let sum = unsafe { slice::from_raw_parts(ptr as *const u8, (length + 0) as usize) }
+        let sum = unsafe { slice::from_raw_parts(ptr as *const u8, length as usize) }
             .iter()
-            .fold(0 as u64, |acc, x| acc + (*x) as u64);
+            .fold(0_u64, |acc, x| acc + (*x) as u64);
         assert_eq!(sum % 0x100, 0);
     }
 
@@ -190,7 +294,7 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
             (apic.length as usize) - core::mem::size_of::<SystemDescriptionHeader>(),
         )
     };
-    println!("{:?}", data);
+    // println!("{:?}", data);
 
     let mut apics = ArrayVec::<X2Apic, 256>::new();
     let mut remainder = data;
@@ -201,7 +305,7 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     apics.iter().for_each(|x| println!("{:?}", x));
 
     println!("{:?}", xsdt);
-    println!("{}", length);
+    // println!("{}", length);
 
     // tables.iter().for_each(|x| {
     //     println!("{:?}", unsafe {
@@ -301,15 +405,17 @@ fn ap_init_rs() -> ! {
     unsafe {
         idt.load_unsafe();
     }
-    let mut a: u64 = 15000000;
-    while a > 0 {
-        a -= 1;
-        unsafe {
-        asm!("pause");
-        }
-    }
-    println!("lmao");
-    println!("lmao");
+
+    let apic_id = unsafe {
+        (crate::PHYS_OFFSET + 0xFE8 as u64)
+            .as_mut_ptr::<u64>()
+            .read()
+    };
+
+    println!("Cpu with apic id {apic_id}: Started");
+    enable_x2apic();
+    println!("Cpu with apic id {apic_id}: Enabled x2Apic");
+
     loop {}
 }
 
@@ -320,24 +426,76 @@ pub fn alloc_stack(allocator: &mut crate::frame::Allocator, idx: usize) -> u64 {
     while i < 0x2000 {
         i += 1;
         let frame = allocator.allocate().unwrap();
-        // println!("{}, {}, {}", base, idx * 0x2000000 , i * 0x1000);
-        // println!("{}", (base + idx * 0x3000000 + i * 0x1000));
-            // println!("{:?}", x86_64::VirtAddr::try_new((base + idx * 0x2000000 + i * 0x1000) as u64));
         crate::map_page(
             allocator,
             x86_64::VirtAddr::new((base + idx * 0x2000000 + i * 0x1000) as u64),
             frame,
         );
-        // println!("eyo wtf");
     }
 
     (base + (idx + 1) * 0x2000000) as u64
 }
 
+fn enable_x2apic() {
+    let mut apic_reg = Msr::new(0x0000001B);
+    unsafe {
+        apic_reg.write(ApicMsr(unsafe { apic_reg.read() }).with_enable(true).into());
+    }
+
+    println!("Enabled apic");
+
+    unsafe {
+        apic_reg.write(
+            ApicMsr(unsafe { apic_reg.read() })
+                .with_enable_x2apic(true)
+                .into(),
+        );
+    }
+    println!("{:?}", ApicMsr(unsafe { apic_reg.read() }));
+    println!("Enabled x2Apic");
+
+    let mut spurious_vec_reg = Msr::new(0x80F);
+    unsafe {
+        spurious_vec_reg.write(LocalVec(0).with_vec(125).with_software_enable(true).into());
+    }
+}
+
+extern "C" {
+    fn switch_ctx();
+}
+
+extern "C" fn lmao() -> ! {
+    lmao_rs()
+}
+
+fn lmao_rs() -> ! {
+    // println!("We in thread 2 bby");
+    loop {}
+}
+
 pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: u64) {
+    *PROCS.lock() = Some(ArrayVec::new());
+    println!("survived first one");
+    PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
+        rflags: 0,
+        rsp: 0,
+        rip: 0,
+        regs: crate::proc::Registers::default(),
+    });
+
+    let stack_addr = alloc_stack(allocator, 12);
+
+    PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
+        rflags: 0,
+        rsp: stack_addr,
+        rip: unsafe { core::mem::transmute(lmao as *const extern "C" fn() -> !) },
+        regs: crate::proc::Registers::default(),
+    });
+
     let apics = acpi(rdsp_addr);
     // TODO: Make static, this shit lives shorter than ur mom
 
+    println!("Got to idt setup");
     let mut idt = InterruptDescriptorTable::new();
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.divide_error.set_handler_fn(error);
@@ -356,93 +514,45 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     idt.stack_segment_fault.set_handler_fn(gpf);
     idt.x87_floating_point.set_handler_fn(error);
     idt.alignment_check.set_handler_fn(gpf);
+    // idt[255].set_handler_fn(timer_int);
+    unsafe {
+        idt[255].set_handler_addr(x86_64::VirtAddr::new(core::mem::transmute(
+            switch_ctx as *const extern "C" fn(),
+        )));
+    }
     unsafe {
         idt.load_unsafe();
     }
 
-    // Effectively an infinite loop, cuz the cpu just resumes it's prior doings and we still
-    // haven't mapped 0x0 (which makes a lot of sense, lmao)
-    // let ptr: *const i32 = core::ptr::null();
-    // let val = unsafe {*ptr};
-    // println!(
-    //     "{:?}, {:?}",
-    //     unsafe { &*(sgdt().base.as_ptr() as *const GlobalDescriptorTable) },
-    //     unsafe { &*(sidt().base.as_ptr() as *const InterruptDescriptorTable) }
-    // );
-    let mut apic_reg = Msr::new(0x0000001B);
-    let mut reg: ApicMsr = unsafe { apic_reg.read() }.into();
-    reg.set_enable(true);
-    unsafe {
-        apic_reg.write(reg.into());
-    }
+    println!("Got past idt setup");
+    enable_x2apic();
+    println!("Got past x2apic setup");
 
-    let mut reg: ApicMsr = unsafe { apic_reg.read() }.into();
-    reg.set_enable_x2apic(true);
-    unsafe {
-        apic_reg.write(reg.into());
-    }
-    // let base = (crate::PHYS_OFFSET + reg.base()).as_mut_ptr::<u64>();
-
-    let mut reg: ApicMsr = unsafe { apic_reg.read() }.into();
-
-    let mut spurious_vec: LocalVec = 0.into();
-    spurious_vec.set_vec(125);
-    spurious_vec.set_software_enable(true);
-    // unsafe {
-    //     base.byte_add(0xF0).write(spurious_vec.into());
-    // }
-    let mut spurious_vec_reg = Msr::new(0x80F);
-    unsafe {
-        spurious_vec_reg.write(Into::<u64>::into(spurious_vec));
-    }
     let mut error_reg = Msr::new(0x828);
     unsafe {
         error_reg.write(0);
     }
 
-    // let mut timer_vec: LocalVec = 0.into();
-    // // timer_vec.set_message_type(0b100);
-    // timer_vec.set_timer_mode(true);
-    // timer_vec.set_vec(255);
-    // let mut timer_vec_reg = Msr::new(0x832);
-    // unsafe {
-    //     timer_vec_reg.write(timer_vec.into());
-    // }
-    // let timer_initial: u64 = 200;
-    // let mut timer_initial_reg = Msr::new(0x838);
-    // unsafe {
-    //     timer_initial_reg.write(timer_initial);
-    // }
-    // let timer_current = Msr::new(0x839);
     // let apic_id = Msr::new(0x802);
-    println!("{:?}", InterprocessInterrupt((0 & 0xfff00000) | 0x008500));
-    println!(
-        "{:?}",
-        InterprocessInterrupt(((0 & 0x00ffffff) | (1 << 24) << 32) + (0 & 0xfff00000) | 0x00C500)
-    );
+    // println!("{:?}", reg);
 
-    println!("{:?}", x86_64::registers::control::Cr3::read());
-    // println!("{}", unsafe { apic_id.read() });
-    // println!("{}", unsafe { timer_initial_reg.read() });
-    // println!("{}", unsafe { timer_vec_reg.read() });
-    // println!("{}", unsafe { spurious_vec_reg.read() });
-    println!("{:?}", reg);
+    println!("\nStarting APs");
 
+    // TODO: Reclaim bootloader and put somewhere more safe
     let long_mode = include_bytes!("long_mode.o");
-    // This definitely does not do the right thing lmfao
     unsafe {
         core::ptr::copy(
             long_mode.as_ptr(),
-            (crate::PHYS_OFFSET + 0x0 as u64).as_mut_ptr::<u8>(),
+            crate::PHYS_OFFSET.as_mut_ptr::<u8>(),
             4096,
         );
     }
     unsafe {
-        (crate::PHYS_OFFSET + 0xFF8 as u64)
+        (crate::PHYS_OFFSET + 0xFF8_u64)
             .as_mut_ptr::<extern "C" fn() -> !>()
             .write(ap_init);
     }
-    println!("{:?}", x86_64::registers::control::Cr3::read());
+
     let mut ipi = Msr::new(0x830);
     // TODO: Parse ACPI
     for apic in apics.iter().skip(1) {
@@ -452,12 +562,10 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
         let mut init = InterprocessInterrupt(0)
             .with_message_type(MessageType::Init)
             .with_level(true)
-            // .with_trigger_mode(true)
             .with_destination(apic.apic_id);
 
         let mut init2 = InterprocessInterrupt(0)
             .with_message_type(MessageType::Init)
-            // .with_trigger_mode(true)
             .with_destination(apic.apic_id);
 
         let mut startup = InterprocessInterrupt(0)
@@ -467,51 +575,79 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
             .with_vec(0);
 
         unsafe {
-            println!("alloc stack");
             let stack_addr = alloc_stack(allocator, apic.apic_id as usize);
-            (crate::PHYS_OFFSET + 0xFF0 as u64)
+            (crate::PHYS_OFFSET + 0xFF0_u64)
                 .as_mut_ptr::<u64>()
                 .write(stack_addr);
-            println!("after");
-            // (0xFF8 as *mut u64).write(stack)
+
+            (crate::PHYS_OFFSET + 0xFE8_u64)
+                .as_mut_ptr::<u64>()
+                .write(apic.apic_id as u64);
+
             error_reg.write(0);
-            // base.byte_add(0x280).write(0);
-            // (base.byte_add(0x310) as *mut u32).write_volatile((init.0 >> 32) as u32 );
-            // (base.byte_add(0x300) as *mut u32).write_volatile(init.0 as u32);
             ipi.write(init.into());
-            // let mut a: u64 = 55000000;
+            ipi.write(init2.into());
+
+            error_reg.write(0);
+            ipi.write(startup.into());
+
+            // let mut a: u64 = 15000000;
             // while a > 0 {
             //     a -= 1;
-            //     unsafe {
-            //         asm!("pause");
-            //     }
+            //     asm!("pause");
             // }
-            // println!("{:?}", InterprocessInterrupt((base.byte_add(0x300) as *mut u32).read_volatile() as u64));
-            // (base.byte_add(0x310) as *mut u32).write_volatile((init2.0 >> 32) as u32 );
-            // (base.byte_add(0x300) as *mut u32).write_volatile(init2.0 as u32);
-            ipi.write(init2.into());
-            println!("first_cycle");
-            let mut a: u64 = 15000000;
-            while a > 0 {
-                a -= 1;
-                asm!("pause");
-            }
-            println!("no pause");
-            error_reg.write(0);
-            // base.byte_add(0x280).write(0);
-            // println!("{:?}", InterprocessInterrupt((base.byte_add(0x300) as *mut u32).read_volatile() as u64));
-            // println!("llllll");
-            // (base.byte_add(0x310) as *mut u32).write_volatile((startup.0 >> 32) as u32 );
-            // (base.byte_add(0x300) as *mut u32).write_volatile(startup.0 as u32);
-            ipi.write(startup.into());
-            println!("second cycle");
-            let mut a: u64 = 15000000;
-            while a > 0 {
-                a -= 1;
-                asm!("pause");
-            }
-            println!("lmao");
+            // println!("Bsp started cpu with apic id {}", apic.apic_id);
         }
     }
+    println!("Enabled all cpus");
+
+    x86_64::instructions::interrupts::enable();
+    println!("Enabled interrupts");
+
+    let mut timer_vec: LocalVec = 0.into();
+    // timer_vec.set_timer_mode(true);
+    timer_vec.set_vec(255);
+    timer_vec.set_mask(false);
+    let mut timer_vec_reg = Msr::new(0x832);
+    unsafe {
+        timer_vec_reg.write(timer_vec.into());
+    }
+    println!("Got past timer vec");
+
+    let mut divide = Msr::new(0x83E);
+    unsafe {
+        divide.write(0);
+    }
+    println!("Got past divider");
+
+    // 1 Secs at 4 Ghz
+    let timer_initial: u64 = /*4000000000*/ 200;
+    let mut timer_initial_reg = Msr::new(0x838);
+    unsafe {
+        timer_initial_reg.write(timer_initial);
+    }
+    println!("Got past initial timer");
+
+    let mut timer_current = Msr::new(0x839);
+    let current = unsafe { timer_current.read() };
+    println!("{}", current);
+
     loop {}
 }
+
+// let base = (crate::PHYS_OFFSET + reg.base()).as_mut_ptr::<u64>();
+// unsafe {
+//     base.byte_add(0xF0).write(spurious_vec.into());
+// }
+// (0xFF8 as *mut u64).write(stack)
+// base.byte_add(0x280).write(0);
+// (base.byte_add(0x310) as *mut u32).write_volatile((init.0 >> 32) as u32 );
+// (base.byte_add(0x300) as *mut u32).write_volatile(init.0 as u32);
+// println!("{:?}", InterprocessInterrupt((base.byte_add(0x300) as *mut u32).read_volatile() as u64));
+// (base.byte_add(0x310) as *mut u32).write_volatile((init2.0 >> 32) as u32 );
+// (base.byte_add(0x300) as *mut u32).write_volatile(init2.0 as u32);
+// base.byte_add(0x280).write(0);
+// println!("{:?}", InterprocessInterrupt((base.byte_add(0x300) as *mut u32).read_volatile() as u64));
+// println!("llllll");
+// (base.byte_add(0x310) as *mut u32).write_volatile((startup.0 >> 32) as u32 );
+// (base.byte_add(0x300) as *mut u32).write_volatile(startup.0 as u32);

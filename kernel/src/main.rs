@@ -5,6 +5,7 @@
 #![feature(pointer_byte_offsets)]
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
+#![feature(const_maybe_uninit_zeroed)]
 #![no_main]
 
 use arrayvec::ArrayVec;
@@ -53,11 +54,7 @@ fn panic(info: &PanicInfo) -> ! {
 entry_point!(kernel_main, config = &CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    let info_addr = ptr::addr_of!(*boot_info);
-    let a = 0;
-
     let fb = boot_info.framebuffer.as_mut().unwrap();
-    let fb_addr = ptr::addr_of!(*fb.buffer());
     *framebuffer::WRITER.lock() = Some(framebuffer::Writer {
         buffer: framebuffer::CellBuffer {
             buffer: framebuffer::pixel::Buffer {
@@ -68,12 +65,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             },
         },
         position: framebuffer::Position { x: 0, y: 0 },
+        pending_newline: false,
     });
 
-    println!(
-        "Stack address: {:?}\nBootinfo address: {:?}\nFramebuffer address: {:?}",
-        &a, info_addr, fb_addr
-    );
     let mut ranges = ArrayVec::<MemoryRegion, 40>::new();
     let mut last_end = 0;
     let mut range_start = 0;

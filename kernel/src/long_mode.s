@@ -28,7 +28,7 @@ SwitchToLongMode:
     ; Set up segment registers.
     mov ss, ax
     ; Set up stack so that it starts below Main.
-    mov sp, 0xFF0
+    mov sp, 0xFE8
  
     mov ds, ax
     mov es, ax

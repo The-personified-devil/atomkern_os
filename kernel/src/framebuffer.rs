@@ -75,6 +75,7 @@ impl<'a, P: pixel::Color> CellBuffer<'a, P> {
 pub struct Writer<P: pixel::Color + 'static> {
     pub buffer: CellBuffer<'static, P>,
     pub position: Position,
+    pub pending_newline: bool,
 }
 
 const FONT_WIDTH: usize = 8;
@@ -111,10 +112,10 @@ impl<P: pixel::Color> Writer<P> {
 
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
-            b'\n' => self.new_line(),
+            b'\n' => self.new_line(), // self.pending_newline = true,
             byte => {
-                if self.position.x >= self.buffer.width() {
-                    self.new_line();
+                if self.position.x >= self.buffer.width() || self.pending_newline {
+                    self.new_line()
                 }
 
                 self.buffer.write_cell(
@@ -140,6 +141,8 @@ impl<P: pixel::Color> Writer<P> {
             self.position.y += 1;
         }
         self.position.x = 0;
+
+        self.pending_newline = false;
     }
 }
 
