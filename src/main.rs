@@ -19,6 +19,7 @@ fn main() {
         // cmd.arg("--enable-kvm");
         cmd.arg("-machine").arg("type=q35,accel=kvm");
         cmd.arg("-smp").arg("16");
+        cmd.arg("-cpu").arg("host,mtrr=off,pat=off");
         // cmd.arg("-cpu").arg("qemu64,+x2apic");
         // cmd.arg("-usbdevice").arg("host:0781:55a3");
         // cmd.arg("-drive")

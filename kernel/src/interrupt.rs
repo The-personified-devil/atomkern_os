@@ -1,5 +1,6 @@
 use crate::println;
 use arrayvec::ArrayVec;
+use bytemuck::TransparentWrapper;
 use core::arch::asm;
 use core::prelude::*;
 use core::slice;
@@ -11,16 +12,40 @@ use nom::sequence::{preceded, tuple};
 use nom::IResult;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
+use snafu::prelude::*;
 use x86_64::instructions::tables::{sgdt, sidt};
 use x86_64::registers::control::Cr2;
 use x86_64::registers::model_specific::Msr;
 use x86_64::structures::{gdt::*, idt::*};
 
-// #[link(name = "shit")]
-// extern "C" {
-//     #[naked]
-//     fn SwitchToLongMode();
-// }
+bitfield! {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct PatEntry(u8): Debug, FromRaw, IntoRaw {
+        pub mem_type: u8 [try PatMemType] @ 0..=3,
+    }
+}
+
+#[repr(transparent)]
+struct Pat([PatEntry; 8]);
+
+unsafe impl TransparentWrapper<[PatEntry; 8]> for Pat {}
+
+#[derive(Debug, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+pub enum PatMemType {
+    Unchacheable = 0x00,
+    WriteCombining = 0x01,
+    WriteThrough = 0x04,
+    WriteProtected = 0x05,
+    WriteBack = 0x06,
+    Uncached = 0x07,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Test error mashallahi {id}"))]
+struct TestError {
+    id: u8,
+}
 
 bitfield! {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,14 +106,20 @@ extern "x86-interrupt" fn page_fault_handler(
     _: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    println!("Page fault from address {:?} because {:?}", Cr2, error_code);
+    // println!("Page fault from address {:?} because {:?}", Cr2, error_code);
 }
 
-extern "x86-interrupt" fn error(_: InterruptStackFrame) {
+extern "x86-interrupt" fn error(frame: InterruptStackFrame) {
     loop {}
 }
-extern "x86-interrupt" fn gpf(_: InterruptStackFrame, id: u64) {
-    println!("General protection fault with id: {}", id);
+
+extern "x86-interrupt" fn gpf(frame: InterruptStackFrame, id: u64) {
+    // println!("General protection fault with id: {}", id);
+    loop {}
+}
+
+extern "x86-interrupt" fn error_with_code(_: InterruptStackFrame, id: u64) {
+    // println!("Exception with code: {}", id);
     loop {}
 }
 
@@ -115,90 +146,65 @@ static mut REGS: crate::proc::Registers = crate::proc::Registers {
     r15: 0,
 };
 
-extern "x86-interrupt" fn timer_int(_: InterruptStackFrame) {
-    unsafe {
-        asm!(r#"mov {x}, rax
-              mov  {x}+8,   rbx
-              mov  {x}+16,  rcx
-              mov  {x}+24,  rdx
-              mov  {x}+32,  rsi
-              mov  {x}+40,  rdi
-              mov {x}+48,   r8
-              mov {x}+56,   r9
-              mov  {x}+64,  r10
-              mov  {x}+72,  r11
-              mov  {x}+80,  r12
-              mov  {x}+88,  r13
-              mov  {x}+96,  r14
-              mov  {x}+104, r15
-        "#, x = sym REGS);
-    }
-
-    println!("Timer interrupt");
-    println!("{:?}", unsafe { REGS });
-
-    let mut eoi = Msr::new(0x80B);
-    unsafe {
-        eoi.write(0);
-        asm!(r#"mov rax, {x}
-              mov rbx, {x}+8
-              mov rcx, {x}+16
-              mov rdx, {x}+24
-              mov rsi, {x}+32
-              mov rdi, {x}+40
-              mov r8, {x}+48
-              mov r9, {x}+56
-              mov r10, {x}+64
-              mov r11, {x}+72
-              mov r12, {x}+80
-              mov r13, {x}+88
-              mov r14, {x}+96
-              mov r15, {x}+104
-        "#, x = sym REGS);
-    }
-}
-
 static PROCS: spin::Mutex<Option<ArrayVec<crate::proc::Process, 2>>> = spin::Mutex::new(None);
 
 #[no_mangle]
 static mut PROC: crate::proc::Process = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
 
-static CURPROC: spin::Mutex<u64> = spin::Mutex::new(0);
+static CURPROC: spin::Mutex<usize> = spin::Mutex::new(0);
+
+static STATE: spin::Mutex<u64> = spin::Mutex::new(0);
+
+fn is_valid(id: u8) -> Result<(), TestError> {
+    ensure!(id >= 10, TestSnafu { id });
+    Ok(())
+}
 
 #[no_mangle]
 extern "C" fn determine_next_proc() {
     let mut binding = PROCS.lock();
     let procs = binding.as_mut().unwrap();
-    let rflags = procs[0].rflags;
-    let rsp = procs[0].rsp;
-    let proc = &mut procs[*CURPROC.lock() as usize];
+
     let mut cur = CURPROC.lock();
+    let mut state = STATE.lock();
+    let proc = &mut procs[*cur as usize];
+
     unsafe {
-        if *cur == 1 {
-            PROC.rflags = rflags;
-            PROC.rsp = rsp;
-        }
         *proc = PROC;
         proc.regs = REGS;
     }
 
-    let proc = match *cur {
-        0 => {
-            *cur = 1;
-            procs[1]
-        }
-        1 => {
+    let mut proc;
+
+    if *state == 0 {
+        proc = procs[0];
+        *state = 1;
+        *cur = 1;
+    } else if *state == 1 {
+        proc = procs[0];
+        *cur = 0;
+        *state = 2;
+    } else {
+        if *cur == 1 {
+            proc = procs[0];
             *cur = 0;
-            procs[0]
+        } else {
+            proc = procs[1];
+            *cur = 1;
         }
-        _ => unreachable!(),
-    };
+    }
 
     println!("determine_next_proc");
 
     unsafe {
         REGS = proc.regs;
         PROC = proc;
+    }
+
+    let timer_initial: u64 = 4000000000;
+    let mut timer_initial_reg = Msr::new(0x838);
+    unsafe {
+        timer_initial_reg.write(timer_initial);
     }
 }
 
@@ -294,7 +300,7 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
             (apic.length as usize) - core::mem::size_of::<SystemDescriptionHeader>(),
         )
     };
-    // println!("{:?}", data);
+    println!("{:?}", data);
 
     let mut apics = ArrayVec::<X2Apic, 256>::new();
     let mut remainder = data;
@@ -330,6 +336,7 @@ pub struct X2Apic {
 // }
 
 fn to_apic(data: (u8, u8, u32)) -> ParseReturn {
+    println!("to_apic");
     ParseReturn::X2Apic(X2Apic {
         processor_id: data.0.into(),
         flags: data.2,
@@ -338,10 +345,11 @@ fn to_apic(data: (u8, u8, u32)) -> ParseReturn {
 }
 
 fn to_x2apic(data: (u32, u32, u32)) -> ParseReturn {
+    println!("to_x2apic");
     ParseReturn::X2Apic(X2Apic {
-        processor_id: data.0,
+        processor_id: data.2,
         flags: data.1,
-        apic_id: data.2,
+        apic_id: data.0,
     })
 }
 enum ParseReturn {
@@ -396,12 +404,12 @@ fn ap_init_rs() -> ! {
     idt.device_not_available.set_handler_fn(error);
     idt.general_protection_fault.set_handler_fn(gpf);
     idt.double_fault.set_handler_fn(div);
-    idt.invalid_tss.set_handler_fn(gpf);
-    idt.segment_not_present.set_handler_fn(gpf);
-    idt.stack_segment_fault.set_handler_fn(gpf);
-    idt.stack_segment_fault.set_handler_fn(gpf);
+    idt.invalid_tss.set_handler_fn(error_with_code);
+    idt.segment_not_present.set_handler_fn(error_with_code);
+    idt.stack_segment_fault.set_handler_fn(error_with_code);
+    idt.stack_segment_fault.set_handler_fn(error_with_code);
     idt.x87_floating_point.set_handler_fn(error);
-    idt.alignment_check.set_handler_fn(gpf);
+    idt.alignment_check.set_handler_fn(error_with_code);
     unsafe {
         idt.load_unsafe();
     }
@@ -438,6 +446,17 @@ pub fn alloc_stack(allocator: &mut crate::frame::Allocator, idx: usize) -> u64 {
 
 fn enable_x2apic() {
     let mut apic_reg = Msr::new(0x0000001B);
+
+    // The lapic might have been started by the bios, so we disable it first to put it into a more
+    // well known state
+    unsafe {
+        apic_reg.write(
+            ApicMsr(unsafe { apic_reg.read() })
+                .with_enable(false)
+                .with_enable_x2apic(false)
+                .into(),
+        );
+    }
     unsafe {
         apic_reg.write(ApicMsr(unsafe { apic_reg.read() }).with_enable(true).into());
     }
@@ -462,18 +481,22 @@ fn enable_x2apic() {
 
 extern "C" {
     fn switch_ctx();
+    fn create_lmao(_: u64);
 }
 
+#[no_mangle]
 extern "C" fn lmao() -> ! {
     lmao_rs()
 }
 
 fn lmao_rs() -> ! {
-    // println!("We in thread 2 bby");
-    loop {}
+    loop {
+        x86_64::instructions::interrupts::without_interrupts(|| println!("We in thread 2 bby"));
+    }
 }
 
 pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: u64) {
+    // is_valid(2).map_err(|err| snafu::Report::from_error(err)).unwrap();
     *PROCS.lock() = Some(ArrayVec::new());
     println!("survived first one");
     PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
@@ -483,11 +506,9 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
         regs: crate::proc::Registers::default(),
     });
 
-    let stack_addr = alloc_stack(allocator, 12);
-
     PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
         rflags: 0,
-        rsp: stack_addr,
+        rsp: 0,
         rip: unsafe { core::mem::transmute(lmao as *const extern "C" fn() -> !) },
         regs: crate::proc::Registers::default(),
     });
@@ -514,9 +535,8 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     idt.stack_segment_fault.set_handler_fn(gpf);
     idt.x87_floating_point.set_handler_fn(error);
     idt.alignment_check.set_handler_fn(gpf);
-    // idt[255].set_handler_fn(timer_int);
     unsafe {
-        idt[255].set_handler_addr(x86_64::VirtAddr::new(core::mem::transmute(
+        idt[130].set_handler_addr(x86_64::VirtAddr::new(core::mem::transmute(
             switch_ctx as *const extern "C" fn(),
         )));
     }
@@ -604,9 +624,16 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     x86_64::instructions::interrupts::enable();
     println!("Enabled interrupts");
 
+    // Reset timer initial, as the timer may still be running in periodic mode even after being
+    // cycled and will fire when setting the timer vec
+    let mut timer_initial_reg = Msr::new(0x838);
+    unsafe {
+        timer_initial_reg.write(0);
+    }
+
     let mut timer_vec: LocalVec = 0.into();
     // timer_vec.set_timer_mode(true);
-    timer_vec.set_vec(255);
+    timer_vec.set_vec(130);
     timer_vec.set_mask(false);
     let mut timer_vec_reg = Msr::new(0x832);
     unsafe {
@@ -621,7 +648,7 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     println!("Got past divider");
 
     // 1 Secs at 4 Ghz
-    let timer_initial: u64 = /*4000000000*/ 200;
+    let timer_initial: u64 = 4000000000;
     let mut timer_initial_reg = Msr::new(0x838);
     unsafe {
         timer_initial_reg.write(timer_initial);
@@ -632,7 +659,27 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     let current = unsafe { timer_current.read() };
     println!("{}", current);
 
-    loop {}
+    let mut timer_current = Msr::new(0x839);
+    let current = unsafe { timer_current.read() };
+    println!("{}", current);
+
+    loop {
+        let mut state;
+        {
+            x86_64::instructions::interrupts::disable();
+            state = *STATE.lock();
+            unsafe {
+                STATE.force_unlock();
+            }
+            x86_64::instructions::interrupts::enable();
+        }
+        if state == 1 {
+            unsafe {
+                create_lmao(alloc_stack(allocator, 22));
+            }
+        }
+        x86_64::instructions::interrupts::without_interrupts(|| println!("Main thread bb"));
+    }
 }
 
 // let base = (crate::PHYS_OFFSET + reg.base()).as_mut_ptr::<u64>();

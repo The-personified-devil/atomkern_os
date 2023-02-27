@@ -9,6 +9,7 @@ use self::spin::Mutex;
 // use self::volatile::Volatile;
 use core::fmt;
 use core::intrinsics::breakpoint;
+use core::arch::asm;
 
 pub mod pixel;
 
@@ -56,6 +57,9 @@ impl<'a, P: pixel::Color> CellBuffer<'a, P> {
     }
 
     fn new_line(&mut self) {
+        // unsafe {
+        //     asm!("sfence");
+        // }
         for row in 0..self.buffer.height() - CELL_HEIGHT {
             for col in 0..self.buffer.width() {
                 self.buffer[(col, row)] = self.buffer[(col, row + CELL_HEIGHT)];

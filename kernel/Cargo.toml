@@ -21,6 +21,7 @@ volatile = "0.2.6"
 spin = "0.5.2"
 x86_64 = "0.14.10"
 proc-bitfield = "0.2.2"
+bytemuck = "1.13.0"
 
 [dependencies.num_enum]
 version = "0.5.9"
@@ -42,6 +43,11 @@ default-features = false
 [dependencies.nom]
 version = "7"
 default-features = false
+
+[dependencies.snafu]
+version = "0.7.4"
+default-features = false
+features = ["unstable-core-error", "unstable-try-trait"]
 
 [build-dependencies]
 nasm-rs = "0.2.4"

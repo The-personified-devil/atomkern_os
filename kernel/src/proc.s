@@ -1,8 +1,10 @@
 ; Pray that this works lmfao
 extern REGS
+extern lmao
 extern determine_next_proc
 extern PROC
 global switch_ctx
+global create_lmao
 
 switch_ctx:
     ; Step 1: Push everything onto the motherfucking stack
@@ -93,3 +95,7 @@ switch_ctx:
     pop rax
 
     iretq
+
+create_lmao:
+    mov rsp, rdi
+    jmp lmao

@@ -15,6 +15,7 @@ use bootloader_api::{
     info::{MemoryRegion, MemoryRegionKind},
     BootInfo, BootloaderConfig,
 };
+use core::arch::asm;
 use core::panic::PanicInfo;
 use core::prelude::*;
 use core::ptr;
@@ -55,6 +56,15 @@ entry_point!(kernel_main, config = &CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let fb = boot_info.framebuffer.as_mut().unwrap();
+    let mut addr;
+    let mut len;
+    {
+        set_pat();
+
+        let info = fb.info();
+        addr = fb.buffer().as_ptr().addr() / 4096 * 4096;
+        len = info.byte_len;
+    }
     *framebuffer::WRITER.lock() = Some(framebuffer::Writer {
         buffer: framebuffer::CellBuffer {
             buffer: framebuffer::pixel::Buffer {
@@ -67,6 +77,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         position: framebuffer::Position { x: 0, y: 0 },
         pending_newline: false,
     });
+
+    let mut val = addr;
+    while val < addr + len {
+        add_page_flags(VirtAddr::new(val as u64));
+        val += 4096;
+    }
+    wat();
 
     let mut ranges = ArrayVec::<MemoryRegion, 40>::new();
     let mut last_end = 0;
@@ -164,7 +181,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
 
-
     let allocator = allocator.as_mut().unwrap();
 
     allocator.setup();
@@ -182,7 +198,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     allocator.unregister_region(
         PhysAddr::new_truncate(start),
         // Bigger == better :bingshrug:
-        PhysAddr::new_truncate(start + amount_4k + amount_2m + amount_1g + 0x1000)
+        PhysAddr::new_truncate(start + amount_4k + amount_2m + amount_1g + 0x1000),
     );
 
     println!("{:?}", allocator.map_1G);
@@ -239,7 +255,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     iter_table(page_table, 0, &mut first_page);
 
-    interrupt::init(allocator,
+    interrupt::init(
+        allocator,
         boot_info.rsdp_addr.into_option().unwrap(),
         x86_64::registers::control::Cr3::read()
             .0
