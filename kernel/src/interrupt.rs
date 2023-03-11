@@ -1,8 +1,7 @@
+use crate::pcie;
 use crate::println;
 use arrayvec::ArrayVec;
 use bytemuck::TransparentWrapper;
-use core::arch::asm;
-use core::prelude::*;
 use core::slice;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
@@ -13,10 +12,9 @@ use nom::IResult;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
 use snafu::prelude::*;
-use x86_64::instructions::tables::{sgdt, sidt};
 use x86_64::registers::control::Cr2;
 use x86_64::registers::model_specific::Msr;
-use x86_64::structures::{gdt::*, idt::*};
+use x86_64::structures::idt::*;
 
 bitfield! {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,7 +104,8 @@ extern "x86-interrupt" fn page_fault_handler(
     _: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // println!("Page fault from address {:?} because {:?}", Cr2, error_code);
+    println!("Page fault from address {:?} because {:?}", Cr2, error_code);
+    loop {}
 }
 
 extern "x86-interrupt" fn error(frame: InterruptStackFrame) {
@@ -245,7 +244,7 @@ struct ApicHeader {
     pub length: u8,
 }
 
-pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
+pub fn acpi(allocator: &mut crate::frame::Allocator, rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     let rdsp = unsafe { &*((crate::PHYS_OFFSET + rdsp_addr).as_ptr() as *const RSDP2) };
     println!("{:?}", rdsp);
 
@@ -284,6 +283,31 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
         tables.push(table)
     }
 
+    println!("size: {}", core::mem::size_of::<SystemDescriptionHeader>());
+
+    let pcie = tables
+        .iter()
+        .find(|x| core::str::from_utf8(x.signature.as_slice()).unwrap() == "MCFG")
+        .unwrap();
+
+    let data = unsafe {
+        slice::from_raw_parts(
+            core::ptr::addr_of!(pcie.data).byte_offset(8isize) as *const u8,
+            (pcie.length as usize) - core::mem::size_of::<SystemDescriptionHeader>() - 8,
+        )
+    };
+    println!("data: {:?}", data);
+
+    let mut configs = ArrayVec::<PcieRef, 256>::new();
+    let mut data = data;
+    while data.len() >= core::mem::size_of::<PcieRef>() {
+        let config = unsafe { &*(data.as_ptr() as *const PcieRef) };
+        configs.push(config.clone());
+        data = &data[core::mem::size_of::<PcieRef>()..];
+    }
+    println!("configs: {:?}", configs);
+    pcie::pcie_shenanigans(allocator, configs[0].addr);
+
     for table in tables.iter() {
         let signature = core::str::from_utf8(table.signature.as_slice()).unwrap();
         println!("{}:, {:?}", signature, table);
@@ -311,13 +335,6 @@ pub fn acpi(rdsp_addr: u64) -> ArrayVec<X2Apic, 256> {
     apics.iter().for_each(|x| println!("{:?}", x));
 
     println!("{:?}", xsdt);
-    // println!("{}", length);
-
-    // tables.iter().for_each(|x| {
-    //     println!("{:?}", unsafe {
-    //         &*(crate::PHYS_OFFSET + *x).as_ptr::<SystemDescriptionHeader>()
-    //     });
-    // });
     apics
 }
 
@@ -352,10 +369,20 @@ fn to_x2apic(data: (u32, u32, u32)) -> ParseReturn {
         apic_id: data.0,
     })
 }
+
 enum ParseReturn {
     // Apic(Apic),
     X2Apic(X2Apic),
     Skip(u8),
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C, packed)]
+struct PcieRef {
+    addr: u64,
+    segment_group: u16,
+    start_bus: u8,
+    end_bus: u8,
 }
 
 fn to_skip(data: u8) -> ParseReturn {
@@ -496,7 +523,6 @@ fn lmao_rs() -> ! {
 }
 
 pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: u64) {
-    // is_valid(2).map_err(|err| snafu::Report::from_error(err)).unwrap();
     *PROCS.lock() = Some(ArrayVec::new());
     println!("survived first one");
     PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
@@ -509,12 +535,9 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     PROCS.lock().as_mut().unwrap().push(crate::proc::Process {
         rflags: 0,
         rsp: 0,
-        rip: unsafe { core::mem::transmute(lmao as *const extern "C" fn() -> !) },
+        rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
         regs: crate::proc::Registers::default(),
     });
-
-    let apics = acpi(rdsp_addr);
-    // TODO: Make static, this shit lives shorter than ur mom
 
     println!("Got to idt setup");
     let mut idt = InterruptDescriptorTable::new();
@@ -535,18 +558,32 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
     idt.stack_segment_fault.set_handler_fn(gpf);
     idt.x87_floating_point.set_handler_fn(error);
     idt.alignment_check.set_handler_fn(gpf);
+    idt[20].set_handler_fn(crate::pcie::xhci_int);
     unsafe {
-        idt[130].set_handler_addr(x86_64::VirtAddr::new(core::mem::transmute(
-            switch_ctx as *const extern "C" fn(),
-        )));
+        idt[130].set_handler_addr(x86_64::VirtAddr::new(
+            switch_ctx as *const extern "C" fn() as u64,
+        ));
     }
     unsafe {
         idt.load_unsafe();
     }
-
     println!("Got past idt setup");
+
     enable_x2apic();
     println!("Got past x2apic setup");
+
+    x86_64::instructions::interrupts::enable();
+    println!("Enabled interrupts");
+
+    // Reset timer initial, as the timer may still be running in periodic mode even after being
+    // cycled and will fire when setting the timer vec
+    let mut timer_initial_reg = Msr::new(0x838);
+    unsafe {
+        timer_initial_reg.write(0);
+    }
+
+    let apics = acpi(allocator, rdsp_addr);
+    // TODO: Make static, this shit lives shorter than ur mom
 
     let mut error_reg = Msr::new(0x828);
     unsafe {
@@ -614,6 +651,10 @@ pub fn init(allocator: &mut crate::frame::Allocator, rdsp_addr: u64, page_addr: 
             // let mut a: u64 = 15000000;
             // while a > 0 {
             //     a -= 1;
+            //     asm!("pause");
+            // }
+
+            // for i in 0..15000000 {
             //     asm!("pause");
             // }
             // println!("Bsp started cpu with apic id {}", apic.apic_id);

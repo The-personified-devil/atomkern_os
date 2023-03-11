@@ -77,10 +77,16 @@ pub fn set_pat() {
     }
 }
 pub fn wat() {
-
     let mut msr = Msr::new(0x277);
     unsafe {
-        println!("old pat {:?}", Pat::wrap(PatEntry::wrap_slice(&msr.read().to_le_bytes()).try_into().unwrap()));
+        println!(
+            "old pat {:?}",
+            Pat::wrap(
+                PatEntry::wrap_slice(&msr.read().to_le_bytes())
+                    .try_into()
+                    .unwrap()
+            )
+        );
     }
 }
 
@@ -165,7 +171,7 @@ pub fn map_page(
     }
 
     let level2 = &mut level3[l3 as usize];
-    if level2.is_unused() {
+    if level2.addr().is_null() {
         let addr = allocator.allocate().unwrap();
         // println!("{:?}", addr);
         level2.set_addr(addr, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
@@ -181,7 +187,7 @@ pub fn map_page(
     }
 
     let level1 = &mut level2[l2 as usize];
-    if level1.is_unused() {
+    if level1.addr().is_null() {
         let addr = allocator.allocate().unwrap();
         // println!("{:?}", addr);
         level1.set_addr(addr, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
@@ -198,7 +204,7 @@ pub fn map_page(
 
     let entry = &mut level1[l1 as usize];
     entry.set_addr(frame, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
-    // println!("{:?}", entry);
+    /* println!("{:?}", entry); */
 
     // println!("{:?} {:?} {:?} {:?}", level3, level2, level1, entry);
 }

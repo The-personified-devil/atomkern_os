@@ -14,6 +14,8 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = "thin"
+debug = true
 
 [dependencies]
 bootloader_api = "0.11"

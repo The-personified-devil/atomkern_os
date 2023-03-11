@@ -7,9 +7,9 @@ extern crate spin;
 use self::lazy_static::lazy_static;
 use self::spin::Mutex;
 // use self::volatile::Volatile;
+use core::arch::asm;
 use core::fmt;
 use core::intrinsics::breakpoint;
-use core::arch::asm;
 
 pub mod pixel;
 
@@ -106,9 +106,12 @@ impl<P: pixel::Color> Writer<P> {
             .zip(pixels.iter_mut())
         {
             *pixel = if bit {
-                P::from_channels(&[34, 34, 178, 255])
+                // P::from_channels(&[34, 34, 178, 255])
+                // P::from_channels(&[247, 246, 89, 255])
+                P::from_channels(&[219, 178, 235, 255])
             } else {
-                P::from_channels(&[0, 0, 0, 0])
+                // P::from_channels(&[89, 246, 247, 1])
+                P::from_channels(&[40, 40, 40, 255])
             }
         }
         pixels

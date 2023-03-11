@@ -35,13 +35,9 @@ impl PageSize for Size4k {
     const SIZE: usize = 4096;
 }
 
-pub struct Alloc {
+pub struct Alloc {}
 
-}
-
-impl Allocator<Size4k> for Alloc {
-    
-}
+impl Allocator<Size4k> for Alloc {}
 
 pub trait Allocator<Size: PageSize> {
     fn allocate() {

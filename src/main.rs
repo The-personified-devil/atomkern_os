@@ -1,7 +1,7 @@
 fn main() {
     // read env variables that were set in build script
     let uefi_path = env!("UEFI_PATH");
-    let bios_path = env!("BIOS_PATH");
+    // let bios_path = env!("BIOS_PATH");
 
     // choose whether to start the UEFI or BIOS image
     let uefi = true;
@@ -10,7 +10,7 @@ fn main() {
     if uefi {
         cmd.arg("-bios").arg("/usr/share/ovmf/x64/OVMF.fd"); //ovmf_prebuilt::ovmf_pure_efi());
         cmd.arg("-s").arg("-S");
-        cmd.arg("-m").arg("8G");
+        cmd.arg("-m").arg("32G");
         cmd.arg("-d").arg("all");
         cmd.arg("-D").arg("qemulog%d");
         cmd.arg("-no-shutdown");
@@ -20,13 +20,27 @@ fn main() {
         cmd.arg("-machine").arg("type=q35,accel=kvm");
         cmd.arg("-smp").arg("16");
         cmd.arg("-cpu").arg("host,mtrr=off,pat=off");
+        cmd.arg("-device").arg("qemu-xhci,id=xhci");
+        // cmd.arg("-device").arg("usb-mouse,bus=xhci.0");
+        // cmd.arg("-device").arg("usb-kbd,bus=xhci.0");
+        cmd.arg("-net").arg("nic,model=virtio");
+
+        cmd.arg("--trace").arg("usb_*");
+        cmd.arg("--trace").arg("msix_*");
+        cmd.arg("--trace").arg("pci_*");
+        cmd.arg("--trace").arg("esp_pci_*");
+        cmd.arg("--trace").arg("apic_*");
+        cmd.arg("--trace").arg("vfio_*");
+        // cmd.arg("--trace").arg("kvm_*");
+
         // cmd.arg("-cpu").arg("qemu64,+x2apic");
         // cmd.arg("-usbdevice").arg("host:0781:55a3");
         // cmd.arg("-drive")
         //     .arg(format!("if=none,id=stick,format=raw,file={uefi_path}"));
         // cmd.arg("-device").arg("nec-usb-xhci,id=xhci");
         // cmd.arg("-device").arg("usb-storage,bus=xhci.0,drive=stick");
-        cmd.arg("-drive").arg(format!("format=raw,file={uefi_path}"));
+        cmd.arg("-drive")
+            .arg(format!("format=raw,file={uefi_path}"));
     } else {
         // cmd.arg("-drive").arg(format!("format=raw,file={bios_path}"));
     }

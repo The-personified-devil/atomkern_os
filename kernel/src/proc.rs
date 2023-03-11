@@ -1,10 +1,10 @@
-use core::arch::asm;
 use crate::println;
+use core::arch::asm;
 
 #[no_mangle]
 extern "C" fn test() {
     println!("Hopefully this is userspace, it might segfault though");
-    loop{}
+    loop {}
 }
 
 pub fn sysret() {
@@ -23,11 +23,11 @@ pub fn sysret() {
             // sym test
         );
         asm!(
-            "mov r11, 0x202",
-            "sysretq",
-            in("rcx") test
+                "mov r11, 0x202",
+                "sysretq",
+                in("rcx") test
 
-    )
+        )
     }
 }
 

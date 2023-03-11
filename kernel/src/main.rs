@@ -6,7 +6,10 @@
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
 #![feature(const_maybe_uninit_zeroed)]
+#![feature(int_roundings)]
 #![no_main]
+#![allow(unaligned_references)]
+#![warn(clippy::all, clippy::pedantic)]
 
 use arrayvec::ArrayVec;
 use bootloader_api::{
@@ -36,6 +39,7 @@ use x86_64::{
 
 mod framebuffer;
 mod interrupt;
+mod pcie;
 
 const PHYS_OFFSET: VirtAddr = VirtAddr::new_truncate(0x10000000000);
 
@@ -56,8 +60,8 @@ entry_point!(kernel_main, config = &CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let fb = boot_info.framebuffer.as_mut().unwrap();
-    let mut addr;
-    let mut len;
+    let addr;
+    let len;
     {
         set_pat();
 
@@ -65,6 +69,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         addr = fb.buffer().as_ptr().addr() / 4096 * 4096;
         len = info.byte_len;
     }
+
     *framebuffer::WRITER.lock() = Some(framebuffer::Writer {
         buffer: framebuffer::CellBuffer {
             buffer: framebuffer::pixel::Buffer {
@@ -89,7 +94,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut last_end = 0;
     let mut range_start = 0;
     let mut region_kind = bootloader_api::info::MemoryRegionKind::UnknownBios(1);
-    for (i, region) in boot_info.memory_regions.into_iter().enumerate() {
+    for (i, region) in boot_info.memory_regions.iter().enumerate() {
         if last_end == region.start && region.kind == region_kind {
             last_end = region.end;
         } else {
@@ -192,7 +197,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             allocator.register_region(
                 PhysAddr::new_truncate(x.start),
                 PhysAddr::new_truncate(x.end),
-            )
+            );
         });
 
     allocator.unregister_region(
@@ -206,7 +211,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let no1 = allocator.allocate().unwrap();
     let no2 = allocator.allocate().unwrap();
     let no3 = allocator.allocate().unwrap();
-    allocator.deallocate(no3);
+    allocator.deallocate(no3).unwrap();
     println!("{:?} {:?} {:?}", no1, no2, no3);
 
     let page_table = unsafe { active_page_table() };
@@ -249,7 +254,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 unsafe { &mut *(PHYS_OFFSET + entry.addr().as_u64()).as_mut_ptr::<PageTable>() },
                 level + 1,
                 first_page,
-            )
+            );
         }
         // println!("{:?}, {:?}", begin_addr, prev_addr);
     }
