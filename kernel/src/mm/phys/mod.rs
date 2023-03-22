@@ -34,25 +34,3 @@ pub struct Size4k {}
 impl PageSize for Size4k {
     const SIZE: usize = 4096;
 }
-
-pub struct Alloc {}
-
-impl Allocator<Size4k> for Alloc {}
-
-pub trait Allocator<Size: PageSize> {
-    fn allocate() {
-        let size = Size::SIZE;
-        println!("Called alloc with size {size}");
-    }
-
-    // TODO: add length and address params
-    fn deallocate() {
-        let size = Size::SIZE;
-        println!("Called dealloc with size {size}");
-    }
-
-    fn register(&self, range: PageRange<Size>) {
-        let size = Size::SIZE;
-        println!("Called register with size {size}");
-    }
-}

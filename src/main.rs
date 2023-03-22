@@ -19,11 +19,13 @@ fn main() {
         // cmd.arg("--enable-kvm");
         cmd.arg("-machine").arg("type=q35,accel=kvm");
         cmd.arg("-smp").arg("16");
-        cmd.arg("-cpu").arg("host,mtrr=off,pat=off");
+        cmd.arg("-cpu").arg("host");
         cmd.arg("-device").arg("qemu-xhci,id=xhci");
         // cmd.arg("-device").arg("usb-mouse,bus=xhci.0");
         // cmd.arg("-device").arg("usb-kbd,bus=xhci.0");
-        cmd.arg("-net").arg("nic,model=virtio");
+        cmd.arg("-netdev").arg("user,id=user,hostfwd=tcp::2222-:22");
+        cmd.arg("-net").arg("nic,netdev=user,model=virtio-net-pci-non-transitional");
+
 
         cmd.arg("--trace").arg("usb_*");
         cmd.arg("--trace").arg("msix_*");
@@ -31,6 +33,9 @@ fn main() {
         cmd.arg("--trace").arg("esp_pci_*");
         cmd.arg("--trace").arg("apic_*");
         cmd.arg("--trace").arg("vfio_*");
+        cmd.arg("--trace").arg("virtio_*");
+        cmd.arg("--trace").arg("net_*");
+
         // cmd.arg("--trace").arg("kvm_*");
 
         // cmd.arg("-cpu").arg("qemu64,+x2apic");

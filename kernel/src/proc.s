@@ -1,13 +1,12 @@
-; Pray that this works lmfao
-extern REGS
 extern lmao
 extern determine_next_proc
-extern PROC
+
 global switch_ctx
 global create_lmao
 
 switch_ctx:
-    ; Step 1: Push everything onto the motherfucking stack
+    ; Step 1: Push everything onto the stack
+    ; Treat as array, i.e. class MEMORY, so on stack with sysv-abi
     push rax
     push rbx
     push rcx
@@ -23,76 +22,48 @@ switch_ctx:
     push r14
     push r15
 
-    ; Step 2: Put everything into storage
-    mov rax, 14
-.loop:
-    dec rax
-    pop rbx
-    mov [REGS+rax*8], rbx
-    cmp rax, 0
-    jne .loop
-
-    pop r8
-    pop r9
-    pop r10
-    pop r11
-
-    mov [PROC+8], r11
-    mov [PROC], r10
-    mov [PROC+16], r8
-
-    push r11
-    push r10
-    push r9
-    push r8
-
     ; Step 3: Determine which process we wanna execute next
     call determine_next_proc
 
-    pop r8
-    pop r9
-    pop r10
-    pop r11
+    ; Clear all previous data from stack
+    add rsp, 19 * 8
 
-    mov r11, [PROC+8]
-    mov r10, [PROC]
-    mov r8, [PROC+16]
-
-    push r11
-    push r10
-    push r9
-    push r8
-
+    ; First things is ISR stack data, then regs from r15 to rax
+    ; Rax contains returned value, cuz sysv-abi
+    mov rcx, 0
+.set_loop:
+    push qword [rax+rcx*8]
+    inc rcx
+    cmp rcx, 19
+    jne .set_loop
 
     ; Step 4: Reenable lapic interrupt processing
+    ; Do here to not mess with rax from sysv-abi and also as late as possible to not cause int trouble
     mov ecx, 0x80B
     mov eax, 0
     mov edx, 0
     wrmsr
-    
 
-    ; Step 5: Restore registers from the process
-    mov rax, 14
-.set_loop:
-    dec rax
-    push qword [REGS+rax*8]
-    cmp rax, 0
-    jne .set_loop
-
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
+    ; Rax pushed onto stack last, so pop first
     pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+
+    ; mov fs, r15
+    mov r15, [rax+20*8]
+    ; mov cr3, r15
+    mov r15,fs
 
     iretq
 

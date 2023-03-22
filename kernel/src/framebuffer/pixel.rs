@@ -12,8 +12,8 @@ pub trait Color: Copy {
     type SubPixel: Primitive;
 
     fn channel_count() -> usize;
-    fn from_slice<'a>(slice: &'a [Self::SubPixel]) -> &'a Self;
-    fn from_slice_mut<'a>(slice: &'a mut [Self::SubPixel]) -> &'a mut Self;
+    fn from_slice(slice: &[Self::SubPixel]) -> &Self;
+    fn from_slice_mut(slice: &mut [Self::SubPixel]) -> &mut Self;
     fn from_channels(slice: &[usize]) -> Self;
 }
 
@@ -31,7 +31,7 @@ impl Color for RGBA {
 
     /// Act like a transparent wrapper type
     #[inline]
-    fn from_slice<'a>(slice: &'a [Self::SubPixel]) -> &'a Self {
+    fn from_slice(slice: &[Self::SubPixel]) -> &Self {
         unsafe {
             assert_eq!(slice.len(), Self::channel_count());
             core::mem::transmute(slice.as_ptr())
@@ -40,7 +40,7 @@ impl Color for RGBA {
 
     /// Act like a transparent wrapper type
     #[inline]
-    fn from_slice_mut<'a>(slice: &'a mut [Self::SubPixel]) -> &'a mut Self {
+    fn from_slice_mut(slice: &mut [Self::SubPixel]) -> &mut Self {
         unsafe {
             assert_eq!(slice.len(), Self::channel_count());
             core::mem::transmute(slice.as_ptr())

@@ -1,15 +1,7 @@
-extern crate bitvec;
-use self::bitvec::prelude::*;
+use bitvec::prelude::*;
 
-extern crate lazy_static;
-extern crate spin;
-// extern crate volatile;
-use self::lazy_static::lazy_static;
-use self::spin::Mutex;
-// use self::volatile::Volatile;
-use core::arch::asm;
 use core::fmt;
-use core::intrinsics::breakpoint;
+use spin::Mutex;
 
 pub mod pixel;
 
@@ -57,9 +49,6 @@ impl<'a, P: pixel::Color> CellBuffer<'a, P> {
     }
 
     fn new_line(&mut self) {
-        // unsafe {
-        //     asm!("sfence");
-        // }
         for row in 0..self.buffer.height() - CELL_HEIGHT {
             for col in 0..self.buffer.width() {
                 self.buffer[(col, row)] = self.buffer[(col, row + CELL_HEIGHT)];
@@ -119,7 +108,8 @@ impl<P: pixel::Color> Writer<P> {
 
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
-            b'\n' => self.new_line(), // self.pending_newline = true,
+            b'\n' => self.new_line(),
+            // b'\n' => self.pending_newline = true,
             byte => {
                 if self.position.x >= self.buffer.width() || self.pending_newline {
                     self.new_line()
@@ -181,7 +171,22 @@ impl<P: pixel::Color> Writer<P> {
     }
 }
 
-pub static WRITER: Mutex<Option<Writer<pixel::RGBA>>> = Mutex::new(None);
+static WRITER: Mutex<Option<Writer<pixel::RGBA>>> = Mutex::new(None);
+
+pub fn init(info: &'static mut bootloader_api::info::FrameBuffer) {
+    *WRITER.lock() = Some(Writer {
+        buffer: CellBuffer {
+            buffer: pixel::Buffer {
+                width: info.info().width,
+                height: info.info().height,
+                data: info.buffer_mut(),
+                _pixel_type: core::marker::PhantomData,
+            },
+        },
+        position: Position { x: 0, y: 0 },
+        pending_newline: false,
+    });
+}
 
 #[macro_export]
 macro_rules! print {
@@ -197,5 +202,8 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+    // unsafe {
+    //     WRITER.force_unlock();
+    // }
     WRITER.lock().as_mut().unwrap().write_fmt(args).unwrap();
 }

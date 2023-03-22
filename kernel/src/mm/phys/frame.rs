@@ -1,15 +1,13 @@
 use crate::println;
-use core::ops::IndexMut;
 use x86_64::PhysAddr;
 
-// extern crate bitvec;
-use bitvec::slice::BitSlice;
+use bitvec::slice::{from_raw_parts_mut, BitSlice};
 
 #[derive(Debug)]
 pub struct Allocator<'a> {
-    pub map_4K: &'a mut BitSlice,
-    pub map_2M: &'a mut BitSlice,
-    pub map_1G: &'a mut BitSlice,
+    map_4K: &'a mut BitSlice,
+    map_2M: &'a mut BitSlice,
+    map_1G: &'a mut BitSlice,
 }
 
 // have allocerror just use the enum variants or structs used
@@ -25,22 +23,63 @@ pub enum DeallocError {
     Error,
 }
 
+use crate::PHYS_OFFSET;
+use bitvec::prelude::*;
+use bootloader_api::info::MemoryRegion;
+
+impl<'a> Allocator<'a> {
+    pub fn new(region: &'a MemoryRegion, linear_size: usize) -> Allocator<'a> {
+        let amount_4k = linear_size.div_ceil(4096);
+        let amount_2m = amount_4k.div_ceil(512);
+        let amount_1g = amount_2m.div_ceil(512);
+
+        let allocator = Allocator {
+            map_4K: unsafe {
+                from_raw_parts_mut(
+                    bitvec::ptr::BitPtr::from_mut(&mut *(PHYS_OFFSET + region.start).as_mut_ptr()),
+                    amount_4k,
+                )
+                .unwrap()
+            },
+            map_2M: unsafe {
+                from_raw_parts_mut(
+                    bitvec::ptr::BitPtr::from_mut(
+                        &mut *(PHYS_OFFSET + region.start + amount_4k).as_mut_ptr(),
+                    ),
+                    amount_2m,
+                )
+                .unwrap()
+            },
+            map_1G: unsafe {
+                from_raw_parts_mut(
+                    bitvec::ptr::BitPtr::from_mut(
+                        &mut *(PHYS_OFFSET + (region.start + amount_4k as u64 + amount_2m as u64).div_ceil(8) * 8).as_mut_ptr(),
+                    ),
+                    amount_1g.div_ceil(8) * 8,
+                )
+                .unwrap()
+            },
+        };
+
+        for mut bit in allocator.map_4K.iter_mut() {
+            bit.set(true);
+        }
+
+        for mut bit in allocator.map_2M.iter_mut() {
+            bit.set(true);
+        }
+
+        for mut bit in allocator.map_1G.iter_mut() {
+            bit.set(true);
+        }
+
+        allocator
+    }
+}
+
 // TODO: Turn into recursive loops
 // TODO: Bring in line with general allocator design
 impl<'a> Allocator<'a> {
-    pub fn setup(&mut self) {
-        for mut bit in self.map_4K.iter_mut() {
-            bit.set(true);
-        }
-
-        for mut bit in self.map_2M.iter_mut() {
-            bit.set(true);
-        }
-
-        for mut bit in self.map_1G.iter_mut() {
-            bit.set(true);
-        }
-    }
     pub fn allocate(&mut self) -> Result<PhysAddr, AllocError> {
         let index_1g = self
             .map_1G
@@ -107,7 +146,7 @@ impl<'a> Allocator<'a> {
     }
 
     pub fn unregister_region(&mut self, start: PhysAddr, end: PhysAddr) {
-        println!("registered_region from {:?} to {:?}", start, end);
+        println!("unregistered_region from {:?} to {:?}", start, end);
         let mut current = start;
         while current < end {
             let val = current.as_u64() as usize / 0x1000;
