@@ -23,12 +23,13 @@ pub enum DeallocError {
     Error,
 }
 
-use crate::PHYS_OFFSET;
+use crate::phys_offset;
 use bitvec::prelude::*;
-use bootloader_api::info::MemoryRegion;
+use limine::LimineMemmapEntry;
 
 impl<'a> Allocator<'a> {
-    pub fn new(region: &'a MemoryRegion, linear_size: usize) -> Allocator<'a> {
+    // TODO: This should not be bootloader specific
+    pub fn new(region: &'a LimineMemmapEntry, linear_size: usize) -> Allocator<'a> {
         let amount_4k = linear_size.div_ceil(4096);
         let amount_2m = amount_4k.div_ceil(512);
         let amount_1g = amount_2m.div_ceil(512);
@@ -36,7 +37,7 @@ impl<'a> Allocator<'a> {
         let allocator = Allocator {
             map_4K: unsafe {
                 from_raw_parts_mut(
-                    bitvec::ptr::BitPtr::from_mut(&mut *(PHYS_OFFSET + region.start).as_mut_ptr()),
+                    bitvec::ptr::BitPtr::from_mut(&mut *(phys_offset() + region.base).as_mut_ptr()),
                     amount_4k,
                 )
                 .unwrap()
@@ -44,7 +45,7 @@ impl<'a> Allocator<'a> {
             map_2M: unsafe {
                 from_raw_parts_mut(
                     bitvec::ptr::BitPtr::from_mut(
-                        &mut *(PHYS_OFFSET + region.start + amount_4k).as_mut_ptr(),
+                        &mut *(phys_offset() + region.base + amount_4k).as_mut_ptr(),
                     ),
                     amount_2m,
                 )
@@ -53,7 +54,7 @@ impl<'a> Allocator<'a> {
             map_1G: unsafe {
                 from_raw_parts_mut(
                     bitvec::ptr::BitPtr::from_mut(
-                        &mut *(PHYS_OFFSET + (region.start + amount_4k as u64 + amount_2m as u64).div_ceil(8) * 8).as_mut_ptr(),
+                        &mut *(phys_offset() + (region.base + amount_4k as u64 + amount_2m as u64).div_ceil(8) * 8).as_mut_ptr(),
                     ),
                     amount_1g.div_ceil(8) * 8,
                 )

@@ -132,7 +132,7 @@ fn map_section(allocator: &mut Allocator, table: PhysAddr, section: &ProgramHead
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     src_addr,
-                    (crate::PHYS_OFFSET + page.as_u64()).as_mut_ptr::<u8>(),
+                    (crate::phys_offset() + page.as_u64()).as_mut_ptr::<u8>(),
                     cpy_size as usize,
                 )
             }

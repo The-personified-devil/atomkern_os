@@ -231,7 +231,7 @@ extern "C" fn ap_init() -> ! {
 
 fn ap_init_rs() -> ! {
     let apic_id = unsafe {
-        (crate::PHYS_OFFSET + 0xFE8 as u64)
+        (crate::phys_offset() + 0xFE8 as u64)
             .as_mut_ptr::<u64>()
             .read()
     };
@@ -428,13 +428,13 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
     unsafe {
         core::ptr::copy(
             long_mode.as_ptr(),
-            crate::PHYS_OFFSET.as_mut_ptr::<u8>(),
+            crate::phys_offset().as_mut_ptr::<u8>(),
             4096,
         );
     }
 
     unsafe {
-        (crate::PHYS_OFFSET + 0xFF8_u64)
+        (crate::phys_offset() + 0xFF8_u64)
             .as_mut_ptr::<extern "C" fn() -> !>()
             .write(ap_init);
     }
@@ -464,11 +464,11 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
 
         unsafe {
             let stack_addr = alloc_stack(allocator, apic.apic_id as usize);
-            (crate::PHYS_OFFSET + 0xFF0_u64)
+            (crate::phys_offset() + 0xFF0_u64)
                 .as_mut_ptr::<u64>()
                 .write(stack_addr);
 
-            (crate::PHYS_OFFSET + 0xFE8_u64)
+            (crate::phys_offset() + 0xFE8_u64)
                 .as_mut_ptr::<u64>()
                 .write(apic.apic_id as u64);
 

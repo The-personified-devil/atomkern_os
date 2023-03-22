@@ -124,12 +124,13 @@ pub struct Acpi {
 }
 
 impl Acpi {
-    pub fn parse(rdsp_addr: u64) -> Self {
-        let rdsp = unsafe { &*((crate::PHYS_OFFSET + rdsp_addr).as_ptr::<RSDP2>()) };
+    pub fn parse(rdsp_addr: *const u8) -> Self {
+        let rdsp = unsafe { &*rdsp_addr.cast::<RSDP2>() };
         println!("{:?}", rdsp);
 
-        let xsdt =
-            unsafe { &*(crate::PHYS_OFFSET + rdsp.xsdt_addr).as_ptr::<SystemDescriptionHeader>() };
+        let xsdt = unsafe {
+            &*(crate::phys_offset() + rdsp.xsdt_addr).as_ptr::<SystemDescriptionHeader>()
+        };
         println!("{:?}", xsdt);
 
         let length = unsafe { core::ptr::addr_of!(xsdt.length).read_unaligned() };
@@ -151,7 +152,7 @@ impl Acpi {
                 ((core::ptr::addr_of!(xsdt.data).addr() + offset) as *const u64).read_unaligned()
             };
             let table =
-                unsafe { &*(crate::PHYS_OFFSET + addr).as_ptr::<SystemDescriptionHeader>() };
+                unsafe { &*(crate::phys_offset() + addr).as_ptr::<SystemDescriptionHeader>() };
 
             check_signature(table);
             tables.push(table)

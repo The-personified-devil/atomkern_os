@@ -162,7 +162,7 @@ fn get_bar(
     };
     let addr = addr as u64 + offset as u64;
 
-    let virt = crate::PHYS_OFFSET + addr / 4096 * 4096;
+    let virt = crate::phys_offset() + addr / 4096 * 4096;
     crate::mm::virt::map_page(allocator, virt, x86_64::PhysAddr::new(addr / 4096 * 4096));
     virt
 }
@@ -307,13 +307,13 @@ pub fn virtio_shenanigans(allocator: &mut crate::frame::Allocator, config: &mut 
     
     let desc_arr_addr = allocator.allocate().unwrap().as_u64();
     let desc_arr =
-        unsafe { &mut *(crate::PHYS_OFFSET + desc_arr_addr).as_mut_ptr::<[Desc; 100]>() };
+        unsafe { &mut *(crate::phys_offset() + desc_arr_addr).as_mut_ptr::<[Desc; 100]>() };
 
     let used_addr = allocator.allocate().unwrap().as_u64();
-    let used = unsafe { &mut *(crate::PHYS_OFFSET + used_addr).as_mut_ptr::<Used>() };
+    let used = unsafe { &mut *(crate::phys_offset() + used_addr).as_mut_ptr::<Used>() };
 
     let avail_addr = allocator.allocate().unwrap().as_u64();
-    let avail = unsafe { &mut *(crate::PHYS_OFFSET + avail_addr).as_mut_ptr::<Avail>() };
+    let avail = unsafe { &mut *(crate::phys_offset() + avail_addr).as_mut_ptr::<Avail>() };
 
     let queue = common;
     queue.desc = desc_arr_addr;
@@ -387,7 +387,7 @@ pub fn pcie_shenanigans(
     let mut xhci = None;
     let mut net = None;
     for i in 0..256 {
-        let cfg_addr = crate::PHYS_OFFSET + (addr + ((i as u64) << 15));
+        let cfg_addr = crate::phys_offset() + (addr + ((i as u64) << 15));
         let config = unsafe { &*cfg_addr.as_ptr::<PcieConfig>() };
 
         // println!("pcie_config: {:?}", config);
@@ -419,26 +419,26 @@ pub fn pcie_shenanigans(
     println!("bar64: {:?}", bar);
 
     println!("fuck");
-    println!("addr: {:?}", (crate::PHYS_OFFSET + bar));
+    println!("addr: {:?}", (crate::phys_offset() + bar));
 
     crate::mm::virt::map_page(
         allocator,
-        crate::PHYS_OFFSET + bar,
+        crate::phys_offset() + bar,
         x86_64::PhysAddr::new(bar / 4096 * 4096),
     );
 
     crate::mm::virt::map_page(
         allocator,
-        crate::PHYS_OFFSET + bar + 4096usize,
+        crate::phys_offset() + bar + 4096usize,
         x86_64::PhysAddr::new((bar + 4096) / 4096 * 4096),
     );
 
-    let hostcaps_ptr = (crate::PHYS_OFFSET + bar).as_ptr::<HostCaps>();
-    let hostcaps = unsafe { &*(crate::PHYS_OFFSET + bar).as_ptr::<HostCaps>() };
+    let hostcaps_ptr = (crate::phys_offset() + bar).as_ptr::<HostCaps>();
+    let hostcaps = unsafe { &*(crate::phys_offset() + bar).as_ptr::<HostCaps>() };
     println!("hostcaps: {:?}", hostcaps.clone());
 
     let opregs =
-        unsafe { &mut *(crate::PHYS_OFFSET + bar + hostcaps.length as u64).as_mut_ptr::<OpRegs>() };
+        unsafe { &mut *(crate::phys_offset() + bar + hostcaps.length as u64).as_mut_ptr::<OpRegs>() };
     unsafe {
         addr_of_mut!(opregs.cmd).write_volatile(opregs.cmd.clone().with_reset(true));
     }
@@ -483,9 +483,9 @@ pub fn pcie_shenanigans(
     assert_eq!(msi.pending.bar(), 0);
 
     let msireg =
-        (crate::PHYS_OFFSET + bar + (msi.table.offset() << 3) as u64).as_mut_ptr::<MsiReg>();
+        (crate::phys_offset() + bar + (msi.table.offset() << 3) as u64).as_mut_ptr::<MsiReg>();
 
-    let pba = (crate::PHYS_OFFSET + bar + (msi.pending.offset() << 3) as u64).as_mut_ptr::<u8>();
+    let pba = (crate::phys_offset() + bar + (msi.pending.offset() << 3) as u64).as_mut_ptr::<u8>();
 
     crate::mm::virt::map_page(
         allocator,

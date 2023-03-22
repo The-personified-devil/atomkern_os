@@ -1,6 +1,6 @@
 use bitvec::prelude::*;
 
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 use spin::Mutex;
 
 pub mod pixel;
@@ -173,14 +173,14 @@ impl<P: pixel::Color> Writer<P> {
 
 static WRITER: Mutex<Option<Writer<pixel::RGBA>>> = Mutex::new(None);
 
-pub fn init(info: &'static mut bootloader_api::info::FrameBuffer) {
+pub fn init(info: &limine::LimineFramebuffer) {
     *WRITER.lock() = Some(Writer {
         buffer: CellBuffer {
             buffer: pixel::Buffer {
-                width: info.info().width,
-                height: info.info().height,
-                data: info.buffer_mut(),
-                _pixel_type: core::marker::PhantomData,
+                width: info.width as usize,
+                height: info.height as usize,
+                data: unsafe { core::slice::from_raw_parts_mut(info.address.as_ptr().unwrap(), info.size()) },
+                _pixel_type: PhantomData,
             },
         },
         position: Position { x: 0, y: 0 },

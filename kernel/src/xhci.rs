@@ -298,7 +298,7 @@ pub fn msi_kekw(
     let segment_table = allocator.allocate().unwrap();
 
     let segment_entry =
-        unsafe { &mut *(crate::PHYS_OFFSET + segment_table.as_u64()).as_mut_ptr::<SegmentEntry>() };
+        unsafe { &mut *(crate::phys_offset() + segment_table.as_u64()).as_mut_ptr::<SegmentEntry>() };
 
     segment_entry.addr = trb_page.as_u64();
     segment_entry.size = 256; // one whole page
@@ -345,24 +345,24 @@ pub fn msi_kekw(
     };
 
     println!("opsegs: {:?}", opregs.clone());
-    let trb = (crate::PHYS_OFFSET + trb_page.as_u64()).as_ptr::<u8>();
+    let trb = (crate::phys_offset() + trb_page.as_u64()).as_ptr::<u8>();
     let trbs = unsafe { core::slice::from_raw_parts(trb, 4096) };
     println!("rt_reg: {:?}", rt_regs.intregs[0].clone());
 
     let cmd_ring = allocator.allocate().unwrap();
 
     let doorbellreg =
-        (crate::PHYS_OFFSET + bar + capss.dorbell_off as u64).as_mut_ptr::<DoorBellReg>();
+        (crate::phys_offset() + bar + capss.dorbell_off as u64).as_mut_ptr::<DoorBellReg>();
 
     let doorbellregs = unsafe { core::slice::from_raw_parts_mut(doorbellreg, 256) };
 
     crate::mm::virt::map_page(
         allocator,
-        crate::PHYS_OFFSET + bar + capss.dorbell_off as u64,
+        crate::phys_offset() + bar + capss.dorbell_off as u64,
         x86_64::PhysAddr::new(bar + capss.dorbell_off as u64),
     );
 
-    let base_arr = (crate::PHYS_OFFSET + opregs.device_ctx_ptr).as_mut_ptr::<u64>();
+    let base_arr = (crate::phys_offset() + opregs.device_ctx_ptr).as_mut_ptr::<u64>();
     let base_arr = unsafe {
         core::slice::from_raw_parts_mut(base_arr, capss.sparams1.clone().max_slots().into())
     };
@@ -370,7 +370,7 @@ pub fn msi_kekw(
     opregs.cmd_ring = CommandRingCtrl(0)
         .with_ring_ptr(cmd_ring.as_u64() >> 6)
         .with_ring_cycle_state(true);
-    let mut cmd_enque = (crate::PHYS_OFFSET + cmd_ring.as_u64()).as_mut_ptr::<EnableSlotCmd>();
+    let mut cmd_enque = (crate::phys_offset() + cmd_ring.as_u64()).as_mut_ptr::<EnableSlotCmd>();
 
     let transfer_ring = allocator.allocate().unwrap().as_u64();
 
@@ -379,7 +379,7 @@ pub fn msi_kekw(
     let mut deque_cur = deque_orig;
     let mut port = 0;
     loop {
-        let event = unsafe { &mut *(crate::PHYS_OFFSET + (deque_cur)).as_mut_ptr::<Trb>() }.clone();
+        let event = unsafe { &mut *(crate::phys_offset() + (deque_cur)).as_mut_ptr::<Trb>() }.clone();
         println!("event {:?}", event);
         if event.remainder.cycle() {
             deque_cur += 16;
@@ -438,7 +438,7 @@ pub fn msi_kekw(
                 println!("device_lel {:?}", base_arr[event.slot_id as usize]);
 
                 let cmd =
-                    unsafe { (*(crate::PHYS_OFFSET + event.cmd_trb_ptr).as_ptr::<Trb>()).clone() };
+                    unsafe { (*(crate::phys_offset() + event.cmd_trb_ptr).as_ptr::<Trb>()).clone() };
 
                 let cmd_type = cmd.remainder.trb_type().unwrap();
                 if cmd_type == TrbType::EnableSlotCmd {
@@ -447,7 +447,7 @@ pub fn msi_kekw(
                     base_arr[event.slot_id as usize] = allocator.allocate().unwrap().as_u64();
                     let input_ctx_addr = allocator.allocate().unwrap().as_u64();
                     let input_ctx = unsafe {
-                        &mut *(crate::PHYS_OFFSET + input_ctx_addr).as_mut_ptr::<InputContext>()
+                        &mut *(crate::phys_offset() + input_ctx_addr).as_mut_ptr::<InputContext>()
                     };
 
                     input_ctx.ctx.add_flags.set(0, true);
@@ -485,7 +485,7 @@ pub fn msi_kekw(
                             .write_volatile(0);
                     }
                 } else if cmd_type == TrbType::AddrDeviceCmd {
-                    let transfer_ring = (crate::PHYS_OFFSET + transfer_ring).as_mut_ptr::<Trb>();
+                    let transfer_ring = (crate::phys_offset() + transfer_ring).as_mut_ptr::<Trb>();
                     let cmd = unsafe { &mut *transfer_ring.cast::<NoOp>() };
                     *cmd = NoOp {
                         ..NoOp {
@@ -642,16 +642,16 @@ pub fn msi_kekw(
                     }
 
                     let dev = unsafe {
-                        &*(crate::PHYS_OFFSET + base_arr[event.slot_id as usize])
+                        &*(crate::phys_offset() + base_arr[event.slot_id as usize])
                             .as_ptr::<DeviceContext>()
                     };
 
                     let data =
-                        unsafe { &*(crate::PHYS_OFFSET + data).as_ptr::<DeviceDescriptor>() };
+                        unsafe { &*(crate::phys_offset() + data).as_ptr::<DeviceDescriptor>() };
                     println!("lel {:?}", data);
 
                     let data2 = unsafe {
-                        core::slice::from_raw_parts((crate::PHYS_OFFSET + data2).as_ptr::<u8>(), 8)
+                        core::slice::from_raw_parts((crate::phys_offset() + data2).as_ptr::<u8>(), 8)
                     };
                     println!("kb_data {:?}", data2);
                 }

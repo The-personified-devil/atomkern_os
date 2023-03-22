@@ -4,15 +4,13 @@ use bitvec::prelude::*;
 use bytemuck::TransparentWrapper;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
+use crate::phys_offset;
 use x86_64::{
     registers,
     registers::model_specific::Msr,
     structures::paging::{PageTable, PageTableFlags},
     VirtAddr,
 };
-
-// as param?
-const PHYS_OFFSET: VirtAddr = VirtAddr::new_truncate(0x10000000000);
 
 // struct Allocator {
 
@@ -126,14 +124,14 @@ pub fn add_page_flags(addr: x86_64::VirtAddr) {
 pub unsafe fn active_page_table() -> &'static mut PageTable {
     let (page_table, cr3_flags) = registers::control::Cr3::read();
     // println!("start addr: {}", page_table.start_address().as_u64());
-    let addr = PHYS_OFFSET + page_table.start_address().as_u64();
+    let addr = phys_offset() + page_table.start_address().as_u64();
     let page_table_ptr: *mut PageTable = addr.as_mut_ptr();
     unsafe { &mut *page_table_ptr }
 }
 
 pub fn addr_to_table(addr: x86_64::PhysAddr) -> &'static mut PageTable {
     // println!("addr: {}", addr.as_u64());
-    let addr = PHYS_OFFSET + addr.as_u64();
+    let addr = phys_offset() + addr.as_u64();
     let page_table_ptr: *mut PageTable = addr.as_mut_ptr();
     unsafe { &mut *page_table_ptr }
 }
@@ -247,7 +245,7 @@ pub fn proper_map_page(
     flags: MapFlags,
 ) {
     let pml4 = unsafe {
-        &mut *(PHYS_OFFSET + page_table.as_u64()).as_mut_ptr::<PageTable>()
+        &mut *(phys_offset() + page_table.as_u64()).as_mut_ptr::<PageTable>()
     };
 
     // println!("map_page");
