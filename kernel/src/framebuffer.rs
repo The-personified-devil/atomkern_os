@@ -97,10 +97,10 @@ impl<P: pixel::Color> Writer<P> {
             *pixel = if bit {
                 // P::from_channels(&[34, 34, 178, 255])
                 // P::from_channels(&[247, 246, 89, 255])
-                P::from_channels(&[219, 178, 235, 255])
+                P::from_channels(&[255, 181, 141, 255])
             } else {
                 // P::from_channels(&[89, 246, 247, 1])
-                P::from_channels(&[40, 40, 40, 255])
+                P::from_channels(&[90, 90, 90, 255])
             }
         }
         pixels

@@ -276,7 +276,8 @@ pub fn proper_map_page(
 
     page_flags.set(
         PageTableFlags::PRESENT,
-        !flags.contains(MapFlags::NotPresent),
+        // !flags.contains(MapFlags::NotPresent),
+        true,
     );
 
     let level3 = &mut pml4[l4 as usize];
@@ -304,7 +305,7 @@ pub fn proper_map_page(
     }
     if level2.addr().is_null() {
         let addr = allocator.allocate().unwrap();
-        // println!("{:?}", addr);
+        // println!(" alloc for l2 {:?}", addr);
         level2.set_addr(
             addr,
             page_flags,
@@ -326,7 +327,7 @@ pub fn proper_map_page(
     }
     if level1.addr().is_null() {
         let addr = allocator.allocate().unwrap();
-        // println!("{:?}", addr);
+        // println!("alloc for l1 {:?}", addr);
         level1.set_addr(
             addr,
             page_flags,
@@ -347,7 +348,7 @@ pub fn proper_map_page(
         frame,
         page_flags,
     );
-    // /* println!("{:?}", entry); */
+    // println!("eeee{:?}", entry);
 
     // println!("{:?} {:?} {:?} {:?}", level3, level2, level1, entry);
 }

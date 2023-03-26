@@ -106,10 +106,10 @@ pub enum MessageType {
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    _: InterruptStackFrame,
+    frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    println!("Page fault from address {:?} because {:?}", Cr2, error_code);
+    // println!("Page fault from address {:?} because {:?}", Cr2, error_code);
     loop {}
 }
 
@@ -146,8 +146,8 @@ pub fn create_proc(allocator: &mut crate::frame::Allocator, cr3: PhysAddr, entry
             rflags: 0,
             rsp: alloc_stack(allocator, 30),
             rip: entry,
-            cs: 0x1B,
-            ss: 0x23,
+        cs: 0x23,
+        ss: 0x1B,
             regs: [0; 14],
             cr3: cr3.as_u64(),
         });
@@ -355,10 +355,16 @@ fn lmao_rs() -> ! {
 
 static mut GDT: GlobalDescriptorTable = {
     let mut gdt = GlobalDescriptorTable::new();
-    gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_code_segment());
+
+    // Pad out cuz limine sets it up differently
+    gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_code_segment()); // 1
     gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_data_segment());
-    gdt.add_entry(x86_64::structures::gdt::Descriptor::user_code_segment());
     gdt.add_entry(x86_64::structures::gdt::Descriptor::user_data_segment());
+    gdt.add_entry(x86_64::structures::gdt::Descriptor::user_code_segment());
+
+    // Limine's choices
+    gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_code_segment());
+    // gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_data_segment());
 
     gdt
 };
@@ -389,6 +395,10 @@ pub fn init_interrupts() {
         IDT.x87_floating_point.set_handler_fn(error);
         IDT.alignment_check.set_handler_fn(gpf);
 
+        // IDT.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(
+        //     switch_ctx as *const extern "C" fn() as u64,
+        // ));
+
         IDT[20].set_handler_fn(crate::xhci::xhci_int);
 
         IDT[130].set_handler_addr(x86_64::VirtAddr::new(
@@ -409,9 +419,9 @@ pub fn init_interrupts() {
     PROCS.lock().push(Process {
         rflags: 0,
         rsp: 0,
-        rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-        cs: 0x1B,
-        ss: 0x23,
+        rip: lmao as *const extern "C" fn() -> ! as u64,
+        cs: 0x23,
+        ss: 0x1B,
         regs: [0; 14],
         cr3: get_cr3(),
     });
@@ -498,8 +508,8 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
         rflags: 0,
         rsp: alloc_stack(allocator, 30),
         rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-        cs: 0x1B,
-        ss: 0x23,
+        cs: 0x23,
+        ss: 0x1B,
         regs: [0; 14],
         cr3: get_cr3(),
     });
@@ -508,8 +518,8 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
         rflags: 0,
         rsp: alloc_stack(allocator, 31),
         rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-        cs: 0x1B,
-        ss: 0x23,
+        cs: 0x23,
+        ss: 0x1B,
         regs: [0; 14],
         cr3: get_cr3(),
     });
@@ -526,6 +536,8 @@ pub fn init_runtime() {
             let selec = GDT.add_entry(x86_64::structures::gdt::Descriptor::tss_segment(&TSS));
 
             GDT.load();
+            // SS not used in ring 0, so we disappoint limine
+            // x86_64::registers::segmentation::SS
 
             x86_64::instructions::tables::load_tss(selec);
         }
@@ -533,9 +545,9 @@ pub fn init_runtime() {
         PROCS.lock().push(Process {
             rflags: 0,
             rsp: alloc_stack(allocator, 30),
-            rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-            cs: 0x1B,
-            ss: 0x23,
+            rip: lmao as *const extern "C" fn() -> ! as u64,
+        cs: 0x23,
+        ss: 0x1B,
             regs: [0; 14],
             cr3: get_cr3(),
         });
@@ -543,15 +555,15 @@ pub fn init_runtime() {
         PROCS.lock().push(Process {
             rflags: 0,
             rsp: alloc_stack(allocator, 31),
-            rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-            cs: 0x1B,
-            ss: 0x23,
+            rip: lmao as *const extern "C" fn() -> ! as u64,
+        cs: 0x23,
+        ss: 0x1B,
             regs: [0; 14],
             cr3: get_cr3(),
         });
 
         unsafe {
-            asm!("mov gs, {}", in(reg) 0);
+            asm!("mov gs, {:r}", in(reg) 0);
         }
         PROC_QUEUE.lock().put(1);
     }

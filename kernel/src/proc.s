@@ -1,8 +1,10 @@
 extern lmao
 extern determine_next_proc
+extern syscall_handler_rs
 
 global switch_ctx
 global create_lmao
+global syscall_handler
 
 switch_ctx:
     ; Step 1: Push everything onto the stack
@@ -37,6 +39,10 @@ switch_ctx:
     cmp rcx, 19
     jne .set_loop
 
+    ; Update cr3
+    mov rcx, [rax+19*8]
+    mov cr3, rcx
+
     ; Step 4: Reenable lapic interrupt processing
     ; Do here to not mess with rax from sysv-abi and also as late as possible to not cause int trouble
     mov ecx, 0x80B
@@ -45,6 +51,7 @@ switch_ctx:
     wrmsr
 
     ; Rax pushed onto stack last, so pop first
+    ; Stack mapped into userspace, so valid
     pop rax
     pop rbx
     pop rcx
@@ -60,13 +67,16 @@ switch_ctx:
     pop r14
     pop r15
 
-    ; mov fs, r15
-    mov r15, [rax+20*8]
-    ; mov cr3, r15
-    mov r15,fs
-
     iretq
 
 create_lmao:
     mov rsp, rdi
     jmp lmao
+
+syscall_handler:
+; manually preserve rflags stored in r11
+    push r11
+    call syscall_handler_rs
+
+sysret_executor:
+    

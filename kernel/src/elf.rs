@@ -1,11 +1,11 @@
 use crate::{
     frame::Allocator,
-    mm::virt::{proper_map_page, MapFlags},
+    mm::virt::{active_page_table, addr_to_table, proper_map_page, MapFlags},
     println,
 };
 use bitflags::bitflags;
-use core::ptr::addr_of;
-use x86_64::{VirtAddr, PhysAddr};
+use core::{arch::asm, ptr::addr_of};
+use x86_64::{PhysAddr, VirtAddr};
 
 #[derive(Debug)]
 #[repr(C)]
@@ -86,6 +86,18 @@ pub fn parse(allocator: &mut Allocator, slice: &[u8]) -> Option<()> {
 
     let table = allocator.allocate().unwrap();
 
+    let pml4 = addr_to_table(table);
+    let current = unsafe { active_page_table() };
+
+    for i in 1..512 {
+        pml4[i] = current[i].clone();
+    }
+
+    // If this actually fucking works lmfao
+    unsafe {
+        asm!("mov cr3, {:r}", in(reg) table.as_u64());
+    }
+
     for section in sections {
         match section.seg_type {
             1 => map_section(allocator, table, section, unsafe {
@@ -95,13 +107,21 @@ pub fn parse(allocator: &mut Allocator, slice: &[u8]) -> Option<()> {
         }
     }
 
+    println!("cr3 {:?}", table);
     crate::interrupt::create_proc(allocator, table, header.prog_entry_pos);
 
     Some(())
 }
 
-fn map_section(allocator: &mut Allocator, table: PhysAddr, section: &ProgramHeader, addr: *const u8) {
+// this is fucked af
+fn map_section(
+    allocator: &mut Allocator,
+    table: PhysAddr,
+    section: &ProgramHeader,
+    addr: *const u8,
+) {
     let mut flags = MapFlags::empty();
+
     flags.set(
         MapFlags::Executable,
         section.flags.contains(SegmentFlags::Executable),
@@ -111,9 +131,12 @@ fn map_section(allocator: &mut Allocator, table: PhysAddr, section: &ProgramHead
         MapFlags::Writable,
         section.flags.contains(SegmentFlags::Writable),
     );
+    flags.set(MapFlags::User, true);
+    flags.set(MapFlags::Writable, true);
 
-    let mut size = section.size;
-    for i in 0..section.mem_size.div_ceil(4096) {
+    println!("flags {:?}", flags);
+
+    for i in 0..=section.mem_size.div_ceil(4096) {
         let page = allocator.allocate().unwrap();
 
         proper_map_page(
@@ -123,19 +146,13 @@ fn map_section(allocator: &mut Allocator, table: PhysAddr, section: &ProgramHead
             page,
             flags,
         );
+    }
 
-        if size > 0 {
-            size -= 4096;
-            let cpy_size = if size > 0 { 4096 } else { size.abs_diff(0) };
-
-            let src_addr = unsafe { addr.byte_add(i as usize * 4096) };
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    src_addr,
-                    (crate::phys_offset() + page.as_u64()).as_mut_ptr::<u8>(),
-                    cpy_size as usize,
-                )
-            }
-        }
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            addr,
+            core::ptr::from_exposed_addr_mut::<u8>(section.vaddr as usize),
+            section.size as usize,
+        );
     }
 }

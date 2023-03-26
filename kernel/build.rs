@@ -1,6 +1,7 @@
 use std::{env, error::Error};
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    println!("cargo:rerun-if-changed=src/proc.s");
     nasm_rs::compile_library_args("libbruh.a", &["src/proc.s"], &["-felf64"]).unwrap();
 
     println!("cargo:rustc-link-lib=bruh");
