@@ -402,10 +402,10 @@ pub fn pcie_shenanigans(
     }
 
     let xhci = xhci.unwrap();
-    virtio_shenanigans(allocator, net.unwrap());
+    // virtio_shenanigans(allocator, net.unwrap());
 
     // TODO: Flatten call stack
-    loop {}
+    // loop {}
 
     println!("xhci: {:?}", xhci);
     println!("bar0 {}, bar1 {}", xhci.bar0.addr(), xhci.bar1.0);
@@ -469,7 +469,7 @@ pub fn pcie_shenanigans(
         let caps = unsafe { &*caps_ptr };
         println!("caps: {:?}", caps);
         if caps.id == 0x11 {
-            msi = Some(unsafe { &mut *caps_ptr.cast::<MsiCaps>() });
+            msi = Some(unsafe { &mut *caps_ptr.cast::<MsiCaps>().cast_mut() });
         }
         if caps.next == 0 {
             break;
@@ -496,18 +496,18 @@ pub fn pcie_shenanigans(
     let msiregs =
         unsafe { core::slice::from_raw_parts_mut(msireg, (msi.msg_control.size() + 1).into()) };
 
-    let ptr = bitvec::ptr::BitPtr::from_mut(unsafe { &mut *pba });
-    let pending =
-        unsafe { bitvec::slice::from_raw_parts_mut(ptr, (msi.msg_control.size() + 1).into()) };
+    // let ptr = bitvec::ptr::BitPtr::from_mut(unsafe { &mut *pba });
+    // let pending =
+    //     unsafe { bitvec::slice::from_raw_parts_mut(ptr, (msi.msg_control.size() + 1).into()) };
 
     let mut devs = ArrayVec::<Device<'static>, 256>::new();
-    devs.push(Device {
-        msi: Some(Msi {
-            caps: msi,
-            table: msiregs,
-            pending: pending.unwrap(),
-        }),
-    });
+    // devs.push(Device {
+    //     msi: Some(Msi {
+    //         caps: msi,
+    //         table: msiregs,
+    //         pending: pending.unwrap(),
+    //     }),
+    // });
 
     msi_kekw(allocator, &mut devs[0], bar, hostcaps_ptr, msi, opregs);
     devs

@@ -142,13 +142,13 @@ fn _start() -> ! {
     interrupt::init_interrupts();
     crate::proc::setup_syscalls();
 
-    let bytes = include_bytes!("fuck");
-    elf::parse(*interrupt::ALLOC.lock().as_mut().unwrap(), bytes);
+    // let bytes = include_bytes!("fuck");
+    // elf::parse(*interrupt::ALLOC.lock().as_mut().unwrap(), bytes);
     // unsafe { asm!("ud2");} 
 
-    interrupt::init_runtime();
+    // interrupt::init_runtime();
 
-    // crate::pcie::pcie_shenanigans(&mut allocator, &mut acpi.get_pcie_configs());
+    crate::pcie::pcie_shenanigans(&mut allocator, &mut acpi.get_pcie_configs());
 
     // interrupt::init_multicore(
     //     interrupt::ALLOC.lock().as_mut().unwrap(),
