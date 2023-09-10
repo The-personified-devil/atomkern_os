@@ -3,16 +3,22 @@
 #![feature(inline_const)]
 #![feature(const_for)]
 #![feature(const_mut_refs)]
+#![feature(strict_provenance)]
 
 use array_init::array_init;
 use bitvec::array::BitArray;
 use bitvec::prelude::*;
+use core::cell::RefCell;
 use core::ptr::null_mut;
+use core::ptr::{addr_of, addr_of_mut};
+use core::sync::atomic::*;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
-use std::num::NonZeroUsize;
-use std::ptr::{addr_of, addr_of_mut};
-use std::sync::atomic::*;
-use std::cell::RefCell;
+use mmap_fixed::{MapOption, MemoryMap};
+use once_cell::sync::Lazy;
+
+use qcell::{TCell, TCellOwner};
+
+// TODO: Extract size to wordsize into function since it's kinda complex actually
 
 // TODO: Make more dynamic, just set for now
 const SEGMENT_SIZE: usize = 0x2000000; // 32 MiB
@@ -52,6 +58,10 @@ struct SegmentMeta {
     used_map: SliceMap,
     slice_meta: [SliceMeta; SLICES_PER_SEGMENT],
 }
+// First few slices are used by metaata
+//
+type PageId = usize;
+type SegmentId = usize;
 
 impl SegmentMeta {
     // Great way to blow up the stack, causing the one thing rust doesn't properly protect against
@@ -82,15 +92,20 @@ impl SegmentMeta {
         self.used == META_SLICE_COUNT && self.used_map.leading_ones() == META_SLICE_COUNT
     }
 
+    fn is_full(self: &Self) -> bool {
+        // Not necessary, just some additional safety
+        self.used == SLICES_PER_SEGMENT || self.used_map.leading_ones() == SLICES_PER_SEGMENT
+    }
+
     // This entire function is highly unsafe, but if nobody fucked with the source code too much it
     // should be valid, but this design aspect obviously undermines quite a bit of rusts safety
     // The total lack of mutable on the params makes this an even bigger safety nightmare,
     // but we need to make it work ¯\_(ツ)_/¯
-    fn get_page_data(self: &Self, page: &SliceMeta) -> &mut [Block] {
+    fn get_page_data(&self, owner: &mut SliceOwner, page: &SliceMeta) -> &mut [Block] {
         let page_addr = addr_of!(*page);
         let arr_addr = addr_of!(self.slice_meta[0]);
 
-        // Ensure abs goes the right way, bla bla
+        // Ensure abs "rounds" the right way, bla bla
         let idx = unsafe { page_addr.offset_from(arr_addr) }.abs() as usize;
 
         let start_ptr = unsafe {
@@ -100,7 +115,49 @@ impl SegmentMeta {
                 .cast_mut()
         };
 
-        unsafe { core::slice::from_raw_parts_mut(start_ptr, page_kind_to_size(page.kind)) }
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                start_ptr,
+                page_kind_to_size(owner.ro(&page.data).kind) / std::mem::size_of::<Block>(),
+            )
+        }
+    }
+
+    fn get_id_data(&self, owner: &SliceOwner, id: PageId) -> &mut [Block] {
+        let start_ptr = unsafe {
+            addr_of!(*self)
+                .byte_add(id * SLICE_SIZE)
+                .cast::<Block>()
+                .cast_mut()
+        };
+
+        let page = &self.slice_meta[id];
+
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                start_ptr,
+                page_kind_to_size(owner.ro(&page.data).kind) / std::mem::size_of::<Block>(),
+            )
+        }
+    }
+
+    fn get_page(&self, id: PageId) -> &SliceMeta {
+        &self.slice_meta[id]
+    }
+
+    fn alloc_page(&mut self, slices: usize) -> Option<PageId> {
+        if self.used + slices > SLICES_PER_SEGMENT {
+            return None;
+        }
+
+        let old = self.used;
+        self.used += slices;
+
+        for mut val in &mut self.used_map[old..self.used] {
+            *val = true;
+        }
+
+        Some(old)
     }
 }
 
@@ -109,17 +166,20 @@ struct Block {
     next: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 enum PageKind {
     Small,
     Medium,
     Large,
 }
 
-// This primarily contains information about a page, but because it's stored for every slice we
-// refer to it by the term slice
-struct SliceMeta {
-    link: LinkedListLink,
+#[derive(Debug)]
+pub struct SliceMarker;
+type SliceCell<T> = TCell<SliceMarker, T>;
+type SliceOwner = TCellOwner<SliceMarker>;
+
+#[derive(Debug)]
+struct SliceMetaInner {
     kind: PageKind,
     // Could potentially use a smaller integer for this, but why bother, waste is cool, no?
     // Includes blocks in xthread_free_list
@@ -140,25 +200,26 @@ struct SliceMeta {
     block_size: usize,
 }
 
-impl SliceMeta {
-    const fn new() -> Self {
-        Self {
-            link: LinkedListLink::new(),
-            kind: PageKind::Small,
-            used: 0,
-            free_block_list: usize::MAX,
-            xthread_free_list: AtomicUsize::new(0),
-            capacity: 0,
-            // Should not matter, but set it to 8 bytes anyway, i.e. one Block data type (ideally)
-            block_size: 8,
-        }
-    }
+// This primarily contains information about a page, but because it's stored for every slice we
+// refer to it by the term slice
+// #[derive(Debug)]
+struct SliceMeta {
+    link: LinkedListLink,
+    data: SliceCell<SliceMetaInner>,
+}
 
+impl std::fmt::Debug for SliceMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.write_fmt(format_args!("SliceMeta: link: {:?}", self.link))
+    }
+}
+
+impl SliceMetaInner {
     fn is_empty(self: &Self) -> bool {
         self.used == 0
     }
 
-    fn merge_xthread_free(self: &mut Self, slice_data: &mut [Block]) {
+    fn merge_xthread_free(&mut self, slice_data: &mut [Block]) {
         let first_block = self.xthread_free_list.swap(usize::MAX, Ordering::Relaxed);
 
         if first_block == usize::MAX {
@@ -191,11 +252,11 @@ impl SliceMeta {
             return None;
         }
 
-        let block = &mut slice_data[free];
+        let block = &mut slice_data[free * (self.block_size / 8)];
         self.free_block_list = block.next;
         self.used += 1;
 
-        Some(free)
+        Some(free * (self.block_size / 8))
     }
 
     fn block_idx_to_ptr(block_idx: usize, slice_data: &mut [Block]) -> *mut u8 {
@@ -222,24 +283,57 @@ impl SliceMeta {
     }
 
     fn try_extend_free(self: &mut Self, slice_data: &mut [Block]) -> Option<()> {
+        // TODO: Check for correctness
         if self.capacity >= page_kind_to_size(self.kind) / self.block_size {
             return None;
         }
 
-        // Unmath this maybe
-        let block_idx = self.capacity * self.block_size / 8;
-
         let mut previous = self.free_block_list;
         for (i, block) in slice_data
-            [block_idx..(block_idx + 100).min(page_kind_to_size(self.kind) / 8)]
             .iter_mut()
+            .step_by(self.block_size / 8)
+            .skip(self.capacity)
+            .take(100.min(page_kind_to_size(self.kind) / self.block_size))
             .enumerate()
         {
             block.next = previous;
-            previous = block_idx + i;
+            previous = self.capacity + i;
         }
 
+        self.free_block_list = previous;
+
+        self.capacity =
+            // ((block_idx + 100).min(page_kind_to_size(self.kind) / 8) * 8).div_ceil(self.block_size);
+            // 100.min(page_kind_to_size(self.kind) / self.block_size);
+            previous + 1;
+
         Some(())
+    }
+}
+
+impl SliceMeta {
+    const fn new() -> Self {
+        Self {
+            link: LinkedListLink::new(),
+            data: SliceCell::new(SliceMetaInner {
+                kind: PageKind::Small,
+                used: 0,
+                free_block_list: usize::MAX,
+                xthread_free_list: AtomicUsize::new(usize::MAX),
+                capacity: 0,
+                // Should not matter, but set it to 8 bytes anyway, i.e. one Block data type (ideally)
+                block_size: 8,
+            }),
+        }
+    }
+
+    fn is_empty(self: &Self, owner: &mut SliceOwner) -> bool {
+        owner.ro(&self.data).is_empty()
+    }
+
+    // Deduplicate the map lmao
+    fn try_alloc(self: &Self, owner: &mut SliceOwner, slice_data: &mut [Block]) -> Option<*mut u8> {
+        owner.rw(&self.data).try_alloc(slice_data)
     }
 }
 
@@ -277,14 +371,23 @@ impl Queue<'_> {
 // Awful trick copied from mimalloc that relies on segments being 4 MiB aligned, which they should
 // be, but we really have no way of verifying that
 // I do not have the smallest clue how that livetime makes it work, but if it works, sure, great
-fn get_segment<'a>(page: &mut SliceMeta) -> &'a mut SegmentMeta {
-    unsafe { &mut *((addr_of_mut!(*page) as usize & !(0x400000)) as *mut SegmentMeta) }
+fn get_segment<'a>(page: &SliceMeta) -> &'a mut SegmentMeta {
+    unsafe { &mut *(((addr_of!(*page) as usize) & !(0x400000 - 1)) as *mut SegmentMeta) }
 }
 
-struct Heap<'a> {
-    small_size_map: [*mut SliceMeta; SMALL_SIZE_BIN_COUNT],
+// TODO: Abstract over custom marker types to enable multiple instances
+pub struct Heap<'a> {
+    // TODO: Just store reference, we have interior mutability anyway
+    small_size_map: [*const SliceMeta; SMALL_SIZE_BIN_COUNT],
     bin_map: [Queue<'a>; BIN_COUNT],
-    full_bin: Queue<'a>,
+    // full_bin: Queue<'a>,
+
+    // small_free: Queue<'static>,
+    // medium_large_free: Queue<'static>,
+    small_free_bm: FreeBm,
+    medium_large_free_bm: FreeBm,
+
+    owner: SliceOwner,
 }
 
 impl Heap<'_> {
@@ -292,59 +395,198 @@ impl Heap<'_> {
         Self {
             small_size_map: [null_mut(); SMALL_SIZE_BIN_COUNT],
             bin_map: array_init(|_| Queue::new()),
-            full_bin: Queue::new(),
+            // full_bin: Queue::new(),
+
+            // small_free: Queue::new(),
+            // medium_large_free: Queue::new(),
+            small_free_bm: FreeBm::new([0u64; 64]),
+            medium_large_free_bm: FreeBm::new([0u64; 64]),
+
+            owner: SliceOwner::new(),
         }
     }
 
-    fn allocate_small(self: &mut Self, wsize: usize) -> Option<*mut u8> {
-        let small_size = self.small_size_map[wsize];
-        if small_size.is_null() {
-            return None;
-        }
+    // TODO: Turn into distributor function only
+    pub fn allocate(&mut self, size: usize) -> *mut u8 {
+        let wsize = size_to_wsize(size);
 
-        let page = unsafe { &mut *small_size };
-        let segment = get_segment(page);
-        let data = segment.get_page_data(page);
-
-        page.try_alloc(data)
-    }
-
-    fn allocate(self: &mut Self, size: usize) -> *mut u8 {
-        let wsize = size / WORD_SIZE;
-        if wsize <= SMALL_WORDSIZE_MAX {
-            // We'll find surely find a way to allocate memory if this doesn't succeed - Duck, 2023 (<- clueless)
+        if wsize < SMALL_WORDSIZE_MAX {
             if let Some(addr) = self.allocate_small(wsize) {
                 return addr;
             }
         }
 
-        null_mut()
+        if size > MEDIUM_OBJ_MAX_SIZE {
+            // TODO: Implement large object handling as early return
+            //       => Can't move it to Arena because the user should not have direct access to
+            //       arena and should also not have to check for the object size themselves
+            return null_mut();
+        }
+
+        let bin = size_to_bin(size);
+
+        // TODO: Extract to other function OR bring allocate_small back in?
+        if let Some(page) = self.bin_map[bin as usize].list.front().get() {
+            let segment = get_segment(page);
+            let data = segment.get_page_data(&mut self.owner, page);
+
+            if let Some(alloc) = page.try_alloc(&mut self.owner, data) {
+                // println!("Got to get something from the big used page cache");
+                return alloc;
+            }
+        }
+
+        self.bin_map[bin as usize].list.pop_front();
+
+        let (segment_id, page_id) = self.get_page(size);
+
+        let segment = ARENA.get_segment_mut(segment_id);
+
+        let page = segment.get_page(page_id);
+        let data = segment.get_id_data(&self.owner, page_id);
+
+        let bin_wsize = E[bin as usize];
+        println!("SegmentId {segment_id} PageId {page_id}");
+        self.bin_map[bin as usize].list.push_back(page);
+
+        if wsize < SMALL_WORDSIZE_MAX {
+            // TODO: Clean up lmao + Refactor to big PageId
+            let prev_bin_wsize = E[bin as usize - 1];
+            println!("prev_bin_wsize {prev_bin_wsize}, bin_wsize {bin_wsize}");
+
+            for slot in &mut self.small_size_map
+                [prev_bin_wsize + if prev_bin_wsize == 0 { 0 } else { 1 }..(bin_wsize + 1).min(128)]
+            {
+                *slot = addr_of!(*page);
+            }
+        }
+
+        page.try_alloc(&mut self.owner, data).unwrap()
     }
 
-    fn alloc_generic(self: &mut Self, wsize: usize) -> *mut u8 {
-        null_mut()
+    fn get_page(&mut self, size: usize) -> (SegmentId, PageId) {
+        // let wsize = size_to_wsize(size);
+
+        // TODO: Extract into sane function
+        let kind = if size < SMALL_OBJ_MAX_SIZE {
+            PageKind::Small
+        } else {
+            PageKind::Medium
+        };
+
+        let segment_id;
+        let segment;
+
+        if let Some(index) = (kind == PageKind::Small)
+            .then(|| self.small_free_bm.first_one())
+            .flatten()
+        {
+            segment_id = index;
+
+            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta;
+            segment = unsafe { ptr.as_mut().unwrap() };
+
+            // TODO: Exactly this is problematic it causes a bunch of all over the place bs and
+            // just creates bugs
+            if segment.used >= 511 {
+                *self.small_free_bm.get_mut(index).unwrap() = false;
+            }
+        } else if let Some(index) = self.medium_large_free_bm.first_one() {
+            segment_id = index;
+
+            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta;
+            segment = unsafe { ptr.as_mut().unwrap() };
+
+            // TODO: This always loses the entire 8 slices even if only 1 ends up getting
+            // used
+            println!("used {}", segment.used);
+            if segment.used + 8 > 504 {
+                *self.medium_large_free_bm.get_mut(index).unwrap() = false;
+            }
+        } else {
+            let ptr = ARENA.alloc() as *mut SegmentMeta;
+            segment = unsafe { ptr.as_mut().unwrap() };
+            *segment = SegmentMeta::new();
+
+            segment_id = ARENA.ptr_to_id(segment);
+
+            *self.medium_large_free_bm.get_mut(segment_id).unwrap() = true;
+        }
+        // TODO: Don't do stupid predictive calculation just ask the segment afterwards and then
+        // directly set the data
+
+        let page_slices = match kind {
+            PageKind::Small => 1,
+            PageKind::Medium => 8,
+            _ => unreachable!(),
+        };
+
+        let page_id = segment.alloc_page(page_slices).unwrap();
+        let page = segment.get_page(page_id);
+
+        let bin_wsize = E[size_to_bin(size) as usize];
+
+        let inner = self.owner.rw(&page.data);
+
+        inner.block_size = bin_wsize * 8;
+        inner.kind = kind;
+
+        (segment_id, page_id)
     }
 
+    fn allocate_small(&mut self, wsize: usize) -> Option<*mut u8> {
+        // TODO: Should it start at index 0 (-> see small test in `allocate()`)
+        let small_size = self.small_size_map[wsize];
+        if small_size.is_null() {
+            return None;
+        }
+
+        let page = unsafe { &*small_size };
+        let segment = get_segment(page);
+        let data = segment.get_page_data(&mut self.owner, page);
+
+        page.try_alloc(&mut self.owner, data)
+    }
 }
 
-struct SegmentTld {
-    small_free: Queue<'static>,
-    medium_large_free: Queue<'static>,
-}
+type FreeBm = BitArray<[u64; 64], Lsb0>;
 
 struct Arena {
     block_count: AtomicUsize,
-    dirty: [AtomicU64; 16],
-    used: [AtomicU64; 16],
+    // Msb0
+    dirty: [AtomicU64; 64],
+    used: [AtomicU64; 64],
     // Has to be 4MiB aligned, due to segment_from_page shenaniganry
-    start: AtomicPtr<u8>,
+    start: AtomicPtr<SegmentMeta>,
 }
 
 const BLOCK_SIZE: usize = SEGMENT_SIZE;
 
 impl Arena {
+    fn alloc(&self) -> *mut SegmentMeta {
+        if let Some(index) = self.try_find_claim() {
+            println!("{}", index);
+            return unsafe {
+                self.start
+                    .load(Ordering::Relaxed)
+                    .byte_add(BLOCK_SIZE * (index as usize))
+            };
+        }
+
+        if let Some(_) = self.alloc_new_unclaimed() {
+            let index = self.try_find_claim().unwrap();
+            return unsafe {
+                self.start
+                    .load(Ordering::Relaxed)
+                    .byte_add(BLOCK_SIZE * index as usize)
+            };
+        }
+
+        unreachable!();
+    }
+
     // TODO: Already searched bits optimization
-    fn try_find_claim(self: &mut Self) -> Option<u64> {
+    fn try_find_claim(&self) -> Option<u64> {
         let value_count = self.block_count.load(Ordering::Relaxed).div_ceil(64);
         for (i, value) in self.used[..value_count].iter().enumerate() {
             let old = value.load(Ordering::Relaxed);
@@ -357,17 +599,18 @@ impl Arena {
             let mask = 0b1 << (64 - leading - 1);
             let new = old | mask;
 
-            if let Ok(bitidx) =
+            if let Ok(_) =
                 value.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
-                return Some(i as u64 * 64 + bitidx);
+                println!("i {} bitidx {}", i, leading);
+                return Some(i as u64 * 64 + leading as u64);
             }
         }
 
         None
     }
 
-    fn alloc_new_from_os(self: &mut Self) -> Option<u64> {
+    fn alloc_new_from_os(&self) -> Option<u64> {
         // Increment immediately, we don't want another thread trying to allocate the same block
         let old_block_count = self.block_count.fetch_add(1, Ordering::Relaxed);
 
@@ -378,11 +621,12 @@ impl Arena {
                 .byte_add(BLOCK_SIZE * old_block_count)
         };
 
-        // TODO: Actually alloc from os
-        None
+        sys_alloc(addr as u64, SEGMENT_SIZE as u64);
+        Some(old_block_count as u64)
     }
 
-    fn alloc_new_unclaimed(self: &mut Self) -> Option<u64> {
+    // TODO: bit inefficient having to redo it after
+    fn alloc_new_unclaimed(&self) -> Option<u64> {
         let idx = self.alloc_new_from_os()?;
 
         let value_idx = idx / 64;
@@ -390,13 +634,15 @@ impl Arena {
 
         let old = value.load(Ordering::Relaxed);
 
-        let bit_shift = 64 - (idx - value_idx) - 1;
+        let bit_shift = 64 - 1 - (idx - value_idx * 64);
         // Unset bit corresponding to block, marking it as free
         let new = old & !(0b1 << bit_shift);
 
         value
             .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
+            .unwrap();
+
+        Some(idx)
     }
 
     fn new() -> Self {
@@ -404,38 +650,168 @@ impl Arena {
         // to check whether we're going out of bound of our blocks in the middle of a bitmap value
         Self {
             block_count: AtomicUsize::new(0),
-            dirty: [const { AtomicU64::new(!0) }; 16],
-            used: [const { AtomicU64::new(!0) }; 16],
-            start: AtomicPtr::new(null_mut()),
+            dirty: [const { AtomicU64::new(!0) }; 64],
+            used: [const { AtomicU64::new(!0) }; 64],
+            start: AtomicPtr::new(0x3EC0000000 as *mut SegmentMeta),
         }
+    }
+
+    // TODO: Ensure that SegmentMeta size != Segment size never happens again
+    fn ptr_to_id(&self, ptr: *const SegmentMeta) -> SegmentId {
+        unsafe { ptr.byte_offset_from(self.start.load(Ordering::Relaxed)) }.unsigned_abs()
+            / SEGMENT_SIZE
+    }
+
+    // TODO: This is unsafe with the prerequisite of the Segment being owned by the same thread
+    // that is calling this
+    fn get_segment_mut(&self, id: SegmentId) -> &mut SegmentMeta {
+        unsafe { self.start.load(Ordering::Relaxed).byte_add(id * SEGMENT_SIZE).as_mut().unwrap() }
     }
 }
 
 thread_local! {
+    // TODO: Make not use fixed addr allocs
     pub static TLD: RefCell<*mut Tld<'static>> = RefCell::new(init());
 }
 
 fn sys_alloc(addr: u64, size: u64) {
-    unsafe {
-        do_syscall(2, 0, addr, 0, size);
-    }
+    std::mem::forget(
+        MemoryMap::new(
+            size as usize,
+            &[
+                MapOption::MapAddr(addr as *mut u8),
+                MapOption::MapWritable,
+                MapOption::MapReadable,
+            ],
+        )
+        .unwrap(),
+    );
 }
 
-struct Tld<'a> {
-    segment: SegmentTld,
-    heap: Heap<'a>,
+pub struct Tld<'a> {
+    pub heap: Heap<'a>,
 }
+
+static ARENA: Lazy<Arena> = Lazy::new(|| Arena::new());
 
 impl Tld<'_> {
     fn new() -> Self {
-        Self { segment: SegmentTld { small_free: Queue::new(), medium_large_free: Queue::new() }, heap: Heap::new() }
+        Self { heap: Heap::new() }
     }
+}
+
+const E: [usize; 75] = [
+    0, // Should not be relevant, could be anything
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8, /* 8 */
+    10,
+    12,
+    14,
+    16,
+    20,
+    24,
+    28,
+    32, /* 16 */
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    112,
+    128, /* 24 */
+    160,
+    192,
+    224,
+    256,
+    320,
+    384,
+    448,
+    512, /* 32 */
+    640,
+    768,
+    896,
+    1024,
+    1280,
+    1536,
+    1792,
+    2048, /* 40 */
+    2560,
+    3072,
+    3584,
+    4096,
+    5120,
+    6144,
+    7168,
+    8192, /* 48 */
+    10240,
+    12288,
+    14336,
+    16384,
+    20480,
+    24576,
+    28672,
+    32768, /* 56 */
+    40960,
+    49152,
+    57344,
+    65536,
+    81920,
+    98304,
+    114688,
+    131072, /* 64 */
+    163840,
+    196608,
+    229376,
+    262144,
+    327680,
+    393216,
+    458752,
+    524288,                      /* 72 */
+    MEDIUM_OBJ_MAX_SIZE / 8 + 1, /* 655360, Huge queue */
+    MEDIUM_OBJ_MAX_SIZE / 8 + 2, /* Full queue */
+];
+
+fn size_to_bin(size: usize) -> u8 {
+    let wsize = size_to_wsize(size);
+
+    let bin: u8;
+
+    if wsize <= 1 {
+        bin = 1;
+    } else if wsize <= 8 {
+        bin = wsize as u8;
+    } else if wsize > MEDIUM_OBJ_MAX_SIZE {
+        bin = 77 as u8;
+    } else {
+        let wsize = wsize - 1;
+        let b = WORD_SIZE as u8 * 8 - 1 - wsize.leading_zeros() as u8;
+
+        // and use the top 3 bits to determine the bin (~12.5% worst internal fragmentation).
+        // - adjust with 3 because we use do not round the first 8 sizes
+        //   which each get an exact bin
+        bin = ((b << 2) + (((wsize >> (b - 2)) as u8) & 0x3)) - 3;
+    }
+
+    bin
+}
+
+fn size_to_wsize(size: usize) -> usize {
+    size.div_ceil(WORD_SIZE)
 }
 
 fn init() -> *mut Tld<'static> {
     // randomly guess for good measure lmao
-    sys_alloc(0xBFFFFFFF, 20);
-    let ptr = 0xBFFFFFFF as *mut Tld;
-    *unsafe {&mut *ptr} = Tld::new();
+    sys_alloc(0x1EC0000000, 20);
+    let ptr = std::ptr::from_exposed_addr_mut::<Tld<'static>>(0x1EC0000000);
+
+    // let ptr = 0x1EC0000000 as *mut Tld;
+    *unsafe { ptr.as_mut().unwrap() } = Tld::new();
     ptr
 }
