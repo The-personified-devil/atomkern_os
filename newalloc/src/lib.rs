@@ -15,7 +15,6 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::*;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
 use mmap_fixed::{MapOption, MemoryMap};
-use once_cell::sync::Lazy;
 
 // TODO: Extract size to wordsize into function since it's kinda complex actually
 
@@ -298,10 +297,7 @@ impl SliceMetaInner {
 
         self.free_block_list = previous;
 
-        self.capacity =
-            // ((block_idx + 100).min(page_kind_to_size(self.kind) / 8) * 8).div_ceil(self.block_size);
-            // 100.min(page_kind_to_size(self.kind) / self.block_size);
-            previous + 1;
+        self.capacity = previous + 1;
 
         Some(())
     }
@@ -641,7 +637,7 @@ impl Arena {
         Some(idx)
     }
 
-    fn new() -> Self {
+    const fn new() -> Self {
         // Storing blocks that the allocator has no knowledge about as used allows us to not have
         // to check whether we're going out of bound of our blocks in the middle of a bitmap value
         Self {
@@ -661,7 +657,13 @@ impl Arena {
     // TODO: This is unsafe with the prerequisite of the Segment being owned by the same thread
     // that is calling this
     fn get_segment_mut(&self, id: SegmentId) -> &mut SegmentMeta {
-        unsafe { self.start.load(Ordering::Relaxed).byte_add(id * SEGMENT_SIZE).as_mut().unwrap() }
+        unsafe {
+            self.start
+                .load(Ordering::Relaxed)
+                .byte_add(id * SEGMENT_SIZE)
+                .as_mut()
+                .unwrap()
+        }
     }
 }
 
@@ -688,7 +690,7 @@ pub struct Tld<'a> {
     pub heap: Heap<'a>,
 }
 
-static ARENA: Lazy<Arena> = Lazy::new(|| Arena::new());
+static ARENA: Arena = Arena::new();
 
 impl Tld<'_> {
     fn new() -> Self {
