@@ -4,6 +4,7 @@
 #![feature(const_for)]
 #![feature(const_mut_refs)]
 #![feature(strict_provenance)]
+#![feature(thread_local)]
 
 use array_init::array_init;
 use bitvec::array::BitArray;
@@ -15,8 +16,6 @@ use core::sync::atomic::*;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
 use mmap_fixed::{MapOption, MemoryMap};
 use once_cell::sync::Lazy;
-
-use qcell::{TCell, TCellOwner};
 
 // TODO: Extract size to wordsize into function since it's kinda complex actually
 
@@ -118,7 +117,7 @@ impl SegmentMeta {
         unsafe {
             core::slice::from_raw_parts_mut(
                 start_ptr,
-                page_kind_to_size(owner.ro(&page.data).kind) / std::mem::size_of::<Block>(),
+                page_kind_to_size(page.data.get(owner).kind) / std::mem::size_of::<Block>(),
             )
         }
     }
@@ -136,7 +135,7 @@ impl SegmentMeta {
         unsafe {
             core::slice::from_raw_parts_mut(
                 start_ptr,
-                page_kind_to_size(owner.ro(&page.data).kind) / std::mem::size_of::<Block>(),
+                page_kind_to_size(page.data.get(owner).kind) / std::mem::size_of::<Block>(),
             )
         }
     }
@@ -173,10 +172,7 @@ enum PageKind {
     Large,
 }
 
-#[derive(Debug)]
-pub struct SliceMarker;
-type SliceCell<T> = TCell<SliceMarker, T>;
-type SliceOwner = TCellOwner<SliceMarker>;
+cell_family::define!(type SliceMarker: SliceOwner for SliceCell<T>);
 
 #[derive(Debug)]
 struct SliceMetaInner {
@@ -328,12 +324,12 @@ impl SliceMeta {
     }
 
     fn is_empty(self: &Self, owner: &mut SliceOwner) -> bool {
-        owner.ro(&self.data).is_empty()
+        self.data.get(owner).is_empty()
     }
 
     // Deduplicate the map lmao
     fn try_alloc(self: &Self, owner: &mut SliceOwner, slice_data: &mut [Block]) -> Option<*mut u8> {
-        owner.rw(&self.data).try_alloc(slice_data)
+        self.data.get_mut(owner).try_alloc(slice_data)
     }
 }
 
@@ -526,7 +522,7 @@ impl Heap<'_> {
 
         let bin_wsize = E[size_to_bin(size) as usize];
 
-        let inner = self.owner.rw(&page.data);
+        let inner = page.data.get_mut(&mut self.owner);
 
         inner.block_size = bin_wsize * 8;
         inner.kind = kind;
