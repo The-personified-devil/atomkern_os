@@ -1,1 +1,5 @@
 /target
+qemulog*
+packetdump
+trace.dat
+trace-cmd.txt
