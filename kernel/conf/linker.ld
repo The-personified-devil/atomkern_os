@@ -26,6 +26,12 @@ SECTIONS {
     }
     .gcc_except_table       : { KEEP(*(.gcc_except_table .gcc_except_table.*)) }
 
+    .cpu_local : {
+        __cpu_local_start = .;
+        KEEP(*(.cpu_local))
+        __cpu_local_end = .;
+    }
+
     . += CONSTANT(MAXPAGESIZE);
 
     .plt                    : { *(.plt .plt.*) }
