@@ -7,6 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
 use x86_64::{registers::model_specific::Msr, structures::idt::InterruptStackFrame};
 
+
 #[derive(Clone, Debug)]
 #[repr(C)]
 pub struct HostCaps {
@@ -86,7 +87,7 @@ bitfield! {
     }
 }
 
-#[derive(Clone, Debug)]
+// #[derive(Clone/* , Debug */)]
 #[repr(C, packed)]
 pub struct OpRegs {
     pub cmd: UsbCmd,
@@ -313,7 +314,7 @@ pub fn msi_kekw(
     // let mut size = rt_regs.intregs[0].event_tbl_size.clone();
     // size.size = 1;
 
-    println!("opsegs: {:?}", opregs.clone());
+    // println!("opsegs: {:?}", opregs.clone());
     unsafe {
         addr_of_mut!(rt_regs.intregs[0].event_tbl_size).write_volatile(TableSize { size: 1 });
     }
@@ -323,18 +324,18 @@ pub fn msi_kekw(
         .set_ptr(segment_entry.addr >> 4);
     rt_regs.intregs[0].table_ptr = segment_table.as_u64();
 
-    unsafe { &mut *((msi as *const MsiCaps) as *mut MsiCaps) }
+    unsafe { (addr_of!(*msi) as *mut MsiCaps).as_mut().unwrap() }
         .msg_control
         .set_enable(true);
 
     unsafe {
-        addr_of_mut!(opregs.cmd).write_volatile(opregs.cmd.clone().with_interrupter_enable(true));
+        addr_of_mut!(opregs.cmd).write_volatile(addr_of_mut!(opregs.cmd).read_unaligned().clone().with_interrupter_enable(true));
         addr_of_mut!(rt_regs.intregs[0].manage)
             .write_volatile(rt_regs.intregs[0].manage.clone().with_enable(true));
     }
 
-    unsafe { addr_of_mut!(opregs.cmd).write_volatile(opregs.cmd.clone().with_run(true)) };
-    println!("opsegs: {:?}", opregs.clone());
+    unsafe { addr_of_mut!(opregs.cmd).write_volatile(addr_of_mut!(opregs.cmd).read_unaligned().clone().with_run(true)) };
+    // println!("opsegs: {:?}", opregs.clone());
 
     let portreg = unsafe { (opregs as *mut _ as *mut PortSet).byte_add(0x400) };
     let portregs = unsafe {
@@ -344,7 +345,7 @@ pub fn msi_kekw(
         )
     };
 
-    println!("opsegs: {:?}", opregs.clone());
+    // println!("opsegs: {:?}", opregs.clone());
     let trb = (crate::phys_offset() + trb_page.as_u64()).as_ptr::<u8>();
     let trbs = unsafe { core::slice::from_raw_parts(trb, 4096) };
     println!("rt_reg: {:?}", rt_regs.intregs[0].clone());
@@ -430,7 +431,7 @@ pub fn msi_kekw(
                 }
 
                 println!("\nport {:?}", portset.clone());
-                println!("\nopregs {:?}", opregs.clone());
+                // println!("\nopregs {:?}", opregs.clone());
                 println!("\nintreg {:?}", intreg.clone());
             } else if trb_type == TrbType::CmdCompletionEv {
                 let event = unsafe { core::mem::transmute_copy::<_, CmdCompletion>(&event) };
@@ -1042,8 +1043,11 @@ enum TrbType {
 }
 
 pub extern "x86-interrupt" fn xhci_int(_: InterruptStackFrame) {
-    println!("\n\n\n\nlmao\n\n\n");
+    // loop {
+    // }
+    // println!("\n\n\n\nlmao\n\n\n");
     let mut eoi = Msr::new(0x80B);
+
     unsafe {
         eoi.write(0);
     }

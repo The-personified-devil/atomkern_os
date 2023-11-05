@@ -25,11 +25,11 @@ pub enum DeallocError {
 
 use crate::phys_offset;
 use bitvec::prelude::*;
-use limine::LimineMemmapEntry;
+use limine::MemmapEntry;
 
 impl<'a> Allocator<'a> {
     // TODO: This should not be bootloader specific
-    pub fn new(region: &'a LimineMemmapEntry, linear_size: usize) -> Allocator<'a> {
+    pub fn new(region: &'a MemmapEntry, linear_size: usize) -> Allocator<'a> {
         let amount_4k = linear_size.div_ceil(4096);
         let amount_2m = amount_4k.div_ceil(512);
         let amount_1g = amount_2m.div_ceil(512);

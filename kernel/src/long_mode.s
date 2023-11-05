@@ -28,90 +28,90 @@ SwitchToLongMode:
     ; Set up segment registers.
     mov ss, ax
     ; Set up stack so that it starts below Main.
-    mov sp, 0xFE8
+    mov sp, 0xFE0
  
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; mov edi, 0x1000
+     mov edi, 0x1000
 
-    ; push di                           ; REP STOSD alters DI.
-    ; mov ecx, 0x1000
-    ; xor eax, eax
-    ; cld
-    ; rep stosd
-    ; pop di                            ; Get DI back.
+     push di                           ; REP STOSD alters DI.
+     mov ecx, 0x1000
+     xor eax, eax
+     cld
+     rep stosd
+     pop di                            ; Get DI back.
  
-    ; Build the Page Map Level 4.
-    ; es:di points to the Page Map Level 4 table.
-;     lea eax, [es:di + 0x1000]         ; Put the address of the Page Directory Pointer Table in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
-;     mov [es:di], eax                  ; Store the value of EAX as the first PML4E.
-;     
-;  
-;  
-;     ; Build the Page Directory Pointer Table.
-;     lea eax, [es:di + 0x2000]         ; Put the address of the Page Directory in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
-;     mov [es:di + 0x1000], eax         ; Store the value of EAX as the first PDPTE.
-;  
-;  
-;     ; Build the Page Directory.
-;     lea eax, [es:di + 0x3000]         ; Put the address of the Page Table in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writeable flag.
-;     mov [es:di + 0x2000], eax         ; Store to value of EAX as the first PDE.
-;  
-;  
-;     push di                           ; Save DI for the time being.
-;     lea di, [di + 0x3000]             ; Point DI to the page table.
-;     mov eax, PAGE_PRESENT | PAGE_WRITE    ; Move the flags into EAX - and point it to 0x0000.
-;  
-;  
-;     ; Build the Page Table.
-; .LoopPageTable:
-;     mov [es:di], eax
-;     add eax, 0x1000
-;     add di, 8
-;     cmp eax, 0x200000                 ; If we did all 2MiB, end.
-;     jb .LoopPageTable
-;  
-;     pop di 
+     ; Build the Page Map Level 4.
+     ; es:di points to the Page Map Level 4 table.
+     lea eax, [es:di + 0x1000]         ; Put the address of the Page Directory Pointer Table in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
+     mov [es:di], eax                  ; Store the value of EAX as the first PML4E.
+     
+  
+  
+     ; Build the Page Directory Pointer Table.
+     lea eax, [es:di + 0x2000]         ; Put the address of the Page Directory in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
+     mov [es:di + 0x1000], eax         ; Store the value of EAX as the first PDPTE.
+  
+  
+     ; Build the Page Directory.
+     lea eax, [es:di + 0x3000]         ; Put the address of the Page Table in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writeable flag.
+     mov [es:di + 0x2000], eax         ; Store to value of EAX as the first PDE.
+  
+  
+     push di                           ; Save DI for the time being.
+     lea di, [di + 0x3000]             ; Point DI to the page table.
+     mov eax, PAGE_PRESENT | PAGE_WRITE    ; Move the flags into EAX - and point it to 0x0000.
+  
+  
+     ; Build the Page Table.
+ .LoopPageTable:
+     mov [es:di], eax
+     add eax, 0x1000
+     add di, 8
+     cmp eax, 0x200000                 ; If we did all 2MiB, end.
+     jb .LoopPageTable
+  
+     pop di 
 
-;     
+     
 
 
 
-;     lea eax, [es:di + 0x4000]         ; Put the address of the Page Directory Pointer Table in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
-;     mov [es:di + 0x10], eax                  ; Store the value of EAX as the first PML4E.
-;  
-;     ; Build the Page Directory Pointer Table.
-;     lea eax, [es:di + 0x5000]         ; Put the address of the Page Directory in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
-;     mov [es:di + 0x4000], eax         ; Store the value of EAX as the first PDPTE.
-;  
-;  
-;     ; Build the Page Directory.
-;     lea eax, [es:di + 0x6000]         ; Put the address of the Page Table in to EAX.
-;     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writeable flag.
-;     mov [es:di + 0x5000], eax         ; Store to value of EAX as the first PDE.
-;  
-;  
-;     push di                           ; Save DI for the time being.
-;     lea di, [di + 0x6000]             ; Point DI to the page table.
-;     mov eax, PAGE_PRESENT | PAGE_WRITE    ; Move the flags into EAX - and point it to 0x0000.
-;  
-;  
-;     ; Build the Page Table.
-; .LoopPageTable2:
-;     mov [es:di], eax
-;     add eax, 0x1000
-;     add di, 8
-;     cmp eax, 0x200000                 ; If we did all 2MiB, end.
-;     jb .LoopPageTable2
-;     pop di                            ; Restore DI.
+     lea eax, [es:di + 0x4000]         ; Put the address of the Page Directory Pointer Table in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
+     mov [es:di + 0x10], eax                  ; Store the value of EAX as the first PML4E.
+  
+     ; Build the Page Directory Pointer Table.
+     lea eax, [es:di + 0x5000]         ; Put the address of the Page Directory in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writable flag.
+     mov [es:di + 0x4000], eax         ; Store the value of EAX as the first PDPTE.
+  
+  
+     ; Build the Page Directory.
+     lea eax, [es:di + 0x6000]         ; Put the address of the Page Table in to EAX.
+     or eax, PAGE_PRESENT | PAGE_WRITE ; Or EAX with the flags - present flag, writeable flag.
+     mov [es:di + 0x5000], eax         ; Store to value of EAX as the first PDE.
+  
+  
+     push di                           ; Save DI for the time being.
+     lea di, [di + 0x6000]             ; Point DI to the page table.
+     mov eax, PAGE_PRESENT | PAGE_WRITE    ; Move the flags into EAX - and point it to 0x0000.
+  
+  
+     ; Build the Page Table.
+ .LoopPageTable2:
+     mov [es:di], eax
+     add eax, 0x1000
+     add di, 8
+     cmp eax, 0x200000                 ; If we did all 2MiB, end.
+     jb .LoopPageTable2
+     pop di                            ; Restore DI.
  
     ; Disable IRQs
     mov al, 0xFF                      ; Out 0xFF to 0xA1 and 0x21 to disable all IRQs.
@@ -128,8 +128,8 @@ SwitchToLongMode:
     mov cr4, eax
  
     ; mov edi, [0xFF8]
-    ; mov edx, edi                      ; Point CR3 at the PML4.
-    mov edx, 0x11000
+    mov edx, edi                      ; Point CR3 at the PML4.
+    ; mov edx, 0x11000
     mov cr3, edx
  
     mov ecx, 0xC0000080               ; Read from the EFER MSR. 
@@ -181,29 +181,8 @@ LongMode:
     mov gs, ax
     mov ss, ax
  
-    ; mov rax, [0xFF8]
-    ; mov cr3, rax
- ;    ; Blank out the screen to a blue color.
- ;    mov edi, 0xB8000
- ;    mov rcx, 500                      ; Since we are clearing uint64_t over here, we put the count as Count/4.
- ;    mov rax, 0x1F201F201F201F20       ; Set the value to set the screen to: Blue background, white foreground, blank spaces.
- ;    rep stosq                         ; Clear the entire screen. 
- ; 
- ;    ; Display "Hello World!"
- ;    mov edi, 0x00b8000              
- ; 
- ;    mov rax, 0x1F6C1F6C1F651F48    
- ;    mov [edi],rax
- ; 
- ;    mov rax, 0x1F6F1F571F201F6F
- ;    mov [edi + 8], rax
- ; 
- ;    mov rax, 0x1F211F641F6C1F72
- ;    mov [edi + 16], rax
-; [BITS 64]      
-; Loop: 
-;     ; jmp Main.Long
-;     jmp Loop
+    mov rax, [0xFE0]
+    mov cr3, rax
 
     mov ecx, 0xC0000080               ; Read from the EFER MSR. 
     rdmsr    

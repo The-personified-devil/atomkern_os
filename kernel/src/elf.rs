@@ -2,7 +2,10 @@ use crate::{
     frame::Allocator,
     mm::virt::{active_page_table, addr_to_table, proper_map_page, MapFlags},
     println,
+    proc::create_proc,
 };
+
+use atomkern_abi as abi;
 use bitflags::bitflags;
 use core::{arch::asm, ptr::addr_of};
 use x86_64::{PhysAddr, VirtAddr};
@@ -53,7 +56,7 @@ bitflags! {
     }
 }
 
-pub fn parse(allocator: &mut Allocator, slice: &[u8]) -> Option<()> {
+pub fn parse(allocator: &mut Allocator, slice: &[u8]) -> (u64, abi::proc::Tls) {
     let addr = addr_of!(*slice);
     let header = unsafe { &*addr.cast::<Header>() };
 
@@ -98,19 +101,29 @@ pub fn parse(allocator: &mut Allocator, slice: &[u8]) -> Option<()> {
         asm!("mov cr3, {:r}", in(reg) table.as_u64());
     }
 
+    let mut tl = None;
+
     for section in sections {
         match section.seg_type {
             1 => map_section(allocator, table, section, unsafe {
                 addr.cast::<u8>().byte_add(section.offset as usize)
             }),
+            7 => tl = Some(section),
             _ => (),
         }
     }
 
-    println!("cr3 {:?}", table);
-    crate::interrupt::create_proc(allocator, table, header.prog_entry_pos);
+    // The loading of the initial image is handeled by a load (this seems to be intended in
+    // the elf tls spec)
 
-    Some(())
+    println!("cr3 {:?}", table);
+    let tls = abi::proc::Tls {
+        image_addr: tl.map_or(0, |x| x.vaddr),
+        image_size: tl.map_or(0, |x| x.size),
+        size: tl.map_or(0, |x| x.mem_size),
+    };
+
+    (header.prog_entry_pos, tls)
 }
 
 // this is fucked af

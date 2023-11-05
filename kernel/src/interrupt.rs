@@ -1,23 +1,29 @@
+use crate::misc::cpu_local::setup_cpu_local;
 use crate::pcie;
 use crate::println;
-use crate::proc::Process;
-use arrayvec::ArrayVec;
 use bytemuck::TransparentWrapper;
 use core::arch::asm;
+use core::cell::Cell;
+use core::cell::OnceCell;
+use core::cell::RefCell;
 use core::mem::transmute;
 use core::ptr::addr_of;
 use core::slice;
+use core::sync::atomic::AtomicUsize;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
 use snafu::prelude::*;
 use x86_64::registers::control::Cr2;
 use x86_64::registers::model_specific::Msr;
+use x86_64::registers::segmentation::Segment;
 use x86_64::structures::gdt::GlobalDescriptorTable;
 use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::idt::*;
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
+
+use crate::misc::cpu_local::CpuLocal;
 
 use crate::acpi::X2Apic;
 
@@ -109,7 +115,7 @@ extern "x86-interrupt" fn page_fault_handler(
     frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // println!("Page fault from address {:?} because {:?}", Cr2, error_code);
+    println!("Page fault from address {:?} because {:?}", Cr2, error_code);
     loop {}
 }
 
@@ -118,10 +124,10 @@ extern "x86-interrupt" fn error(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn gpf(frame: InterruptStackFrame, id: u64) {
-    println!(
-        "General protection fault with id: {} and frame {:?}",
-        id, frame
-    );
+    // println!(
+    //     "General protection fault with id: {} and frame {:?}",
+    //     id, frame
+    // );
     loop {}
 }
 
@@ -135,100 +141,16 @@ extern "x86-interrupt" fn div(_: InterruptStackFrame, id: u64) -> ! {
     loop {}
 }
 
-static PROCS: spin::Mutex<ArrayVec<Process, 200>> =
-    spin::Mutex::new(ArrayVec::<Process, 200>::new_const());
-
-pub fn create_proc(allocator: &mut crate::frame::Allocator, cr3: PhysAddr, entry: u64) {
-    let id;
-    {
-        let mut procs = PROCS.lock();
-        procs.push(Process {
-            rflags: 0,
-            rsp: alloc_stack(allocator, 30),
-            rip: entry,
-        cs: 0x23,
-        ss: 0x1B,
-            regs: [0; 14],
-            cr3: cr3.as_u64(),
-        });
-
-        id = procs.len() as u64 - 1;
-    }
-
-    PROC_QUEUE.lock().put(id);
-}
-
-static PROC_QUEUE: spin::Mutex<LoopedQueue> = spin::Mutex::<_>::new(LoopedQueue::new());
-
-pub fn get_cr3() -> u64 {
-    let value;
-
-    unsafe {
-        asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-
-    value
-}
-
-#[no_mangle]
-extern "C" fn determine_next_proc(regs: [u64; 19]) -> *const Process {
-    println!("regs: {:?}", regs);
-
-    let gs: u64;
-    unsafe {
-        asm!("mov {}, gs", out(reg) gs);
-    }
-
-    let mut binding = PROCS.lock();
-    let procs = binding.as_mut();
-
-    let proc = &mut procs[gs as usize];
-    let value: u64;
-
-    *proc = Process {
-        rip: regs[14],
-        cs: regs[15],
-        rflags: regs[16],
-        rsp: regs[17],
-        ss: regs[18],
-        regs: regs[0..14].try_into().unwrap(),
-        cr3: get_cr3(),
-    };
-
-    println!("proc_queue {:?}", PROC_QUEUE.lock());
-
-    // Have 0 be the Os hlt thread (or currently just spin)
-    // For now this will automatically happen because we only switch to userspace on the first
-    // timer interrupt
-    let new = PROC_QUEUE.lock().take().unwrap_or(0);
-    println!("new {}", new);
-
-    unsafe {
-        asm!("mov gs, {}", in(reg) new);
-    }
-
-    let proc2 = &mut procs[new as usize];
-
-    // TODO: Don't clone rflags here that's bs
-    proc2.rflags = regs[16];
-
-    println!("determine_next_proc");
-
-    let timer_initial: u64 = 4000000000;
-    let mut timer_initial_reg = Msr::new(0x838);
-    unsafe {
-        timer_initial_reg.write(timer_initial);
-    }
-
-    println!("proc2: {:?}", proc2);
-    // Save because only this cpu should be accessing tcb data at this point
-    addr_of!(*proc2)
-}
-
 extern "C" fn ap_init() -> ! {
+    unsafe {
+        asm!("mov cr3, {}", in(reg) core::ptr::from_exposed_addr::<u64>(0xFE0).read(), options(nomem, nostack, preserves_flags));
+    }
+
     ap_init_rs();
 }
 
+// TODO: Passing around allocators is pretty good tbh, but keeping them locked for so awfully long
+// is very bad
 fn ap_init_rs() -> ! {
     let apic_id = unsafe {
         (crate::phys_offset() + 0xFE8 as u64)
@@ -236,56 +158,17 @@ fn ap_init_rs() -> ! {
             .read()
     };
 
-    let mut idt = InterruptDescriptorTable::new();
-    idt.page_fault.set_handler_fn(page_fault_handler);
-    idt.divide_error.set_handler_fn(error);
-    idt.debug.set_handler_fn(error);
-    idt.non_maskable_interrupt.set_handler_fn(error);
-    idt.breakpoint.set_handler_fn(error);
-    idt.overflow.set_handler_fn(error);
-    idt.bound_range_exceeded.set_handler_fn(error);
-    idt.invalid_opcode.set_handler_fn(error);
-    idt.device_not_available.set_handler_fn(error);
-    idt.general_protection_fault.set_handler_fn(gpf);
-    idt.double_fault.set_handler_fn(div);
-    idt.invalid_tss.set_handler_fn(gpf);
-    idt.segment_not_present.set_handler_fn(gpf);
-    idt.stack_segment_fault.set_handler_fn(gpf);
-    idt.x87_floating_point.set_handler_fn(error);
-    idt.alignment_check.set_handler_fn(gpf);
-
-    idt[20].set_handler_fn(crate::xhci::xhci_int);
-
     unsafe {
-        idt[130].set_handler_addr(x86_64::VirtAddr::new(
-            switch_ctx as *const extern "C" fn() as u64,
-        ));
-
-        idt.load_unsafe();
+        x86_64::registers::control::Cr4::update(|x| {
+            x.set(x86_64::registers::control::Cr4Flags::FSGSBASE, true)
+        });
     }
 
-    let mut tss = TaskStateSegment::new();
-
-    tss.privilege_stack_table[0] = VirtAddr::new(alloc_stack(
-        *ALLOC.lock().as_mut().unwrap(),
-        32 + apic_id as usize,
-    ));
-
-    let mut gdt = GlobalDescriptorTable::new();
-    let selec = gdt.add_entry(x86_64::structures::gdt::Descriptor::tss_segment(unsafe {
-        transmute::<_, &'static TaskStateSegment>(&tss)
-    }));
-
-    unsafe {
-        gdt.load_unsafe();
-
-        x86_64::instructions::tables::load_tss(selec);
-    }
+    setup_cpu_local(ALLOC.lock().as_mut().unwrap(), apic_id as usize);
 
     println!("Cpu with apic id {apic_id}: Started");
-    enable_x2apic();
-    x86_64::instructions::interrupts::enable();
 
+    init_interrupts(ALLOC.lock().as_mut().unwrap(), apic_id as usize);
     println!("Cpu with apic id {apic_id}: Enabled x2Apic, interrupts");
 
     init_runtime();
@@ -293,31 +176,31 @@ fn ap_init_rs() -> ! {
     loop {}
 }
 
-pub fn alloc_stack(allocator: &mut crate::frame::Allocator, idx: usize) -> u64 {
+// TODO: Turn into arena to make reusable (obviously important lel)
+static STACK_CNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn alloc_stack(allocator: &mut crate::frame::Allocator) -> u64 {
     let base = 0x30000000000;
+    let idx = STACK_CNT.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 
     let mut i = 0;
-    while i < 0x2000 {
+    while i < 0x20000 {
         i += 1;
         let frame = allocator.allocate().unwrap();
         crate::map_page(
             allocator,
-            x86_64::VirtAddr::new((base + idx * 0x2000000 + i * 0x1000) as u64),
+            x86_64::VirtAddr::new((base + idx * 0x20000000 + i * 0x1000) as u64),
             frame,
         );
     }
 
-    (base + (idx + 1) * 0x2000000) as u64
+    (base + (idx + 1) * 0x20000000) as u64
 }
 
 fn enable_x2apic() {
     let mut apic_reg = Msr::new(0x0000001B);
     unsafe {
-        apic_reg.write(
-            ApicMsr(unsafe { apic_reg.read() })
-                .with_enable_x2apic(true)
-                .into(),
-        );
+        apic_reg.write(ApicMsr(apic_reg.read()).with_enable_x2apic(true).into());
     }
 
     let mut spurious_vec_reg = Msr::new(0x80F);
@@ -353,84 +236,105 @@ fn lmao_rs() -> ! {
     loop {}
 }
 
-static mut GDT: GlobalDescriptorTable = {
+#[link_section = ".cpu_local"]
+static GDT: CpuLocal<OnceCell<GlobalDescriptorTable>> = CpuLocal::new(OnceCell::new());
+
+#[link_section = ".cpu_local"]
+static IDT: CpuLocal<OnceCell<InterruptDescriptorTable>> = CpuLocal::new(OnceCell::new());
+
+#[link_section = ".cpu_local"]
+static TSS: CpuLocal<OnceCell<TaskStateSegment>> = CpuLocal::new(OnceCell::new());
+
+#[link_section = ".cpu_local"]
+static mut SELEC: CpuLocal<SegmentSelector> = CpuLocal::new(SegmentSelector::NULL);
+
+pub fn init_interrupts(allocator: &mut crate::frame::Allocator, id: usize) {
+    // TODO: Be able to register from somewhere else
+
+    let mut idt = InterruptDescriptorTable::new();
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    idt.divide_error.set_handler_fn(error);
+    idt.debug.set_handler_fn(error);
+    idt.non_maskable_interrupt.set_handler_fn(error);
+    idt.breakpoint.set_handler_fn(error);
+    idt.overflow.set_handler_fn(error);
+    idt.bound_range_exceeded.set_handler_fn(error);
+    idt.invalid_opcode.set_handler_fn(error);
+    idt.device_not_available.set_handler_fn(error);
+    idt.general_protection_fault.set_handler_fn(gpf);
+    idt.double_fault.set_handler_fn(div);
+    idt.invalid_tss.set_handler_fn(gpf);
+    idt.segment_not_present.set_handler_fn(gpf);
+    idt.stack_segment_fault.set_handler_fn(gpf);
+    idt.x87_floating_point.set_handler_fn(error);
+    idt.alignment_check.set_handler_fn(gpf);
+
+    // IDT.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(
+    //     switch_ctx as *const extern "C" fn() as u64,
+    // ));
+
+    // TODO: Figure out whether this is reused by virtio
+    idt[20].set_handler_fn(crate::xhci::xhci_int);
+
+    unsafe {
+        idt[130].set_handler_addr(x86_64::VirtAddr::new(
+            switch_ctx as *const extern "C" fn() as u64,
+        ));
+    }
+
+    IDT.set(idt).unwrap();
+
+    IDT.get().unwrap().load();
+
+    let mut tss = TaskStateSegment::new();
+    tss.privilege_stack_table[0] = VirtAddr::new(alloc_stack(allocator));
+    TSS.set(tss).unwrap();
+
     let mut gdt = GlobalDescriptorTable::new();
 
     // Pad out cuz limine sets it up differently
     gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_code_segment()); // 1
-    gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_data_segment());
+    let data = gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_data_segment());
     gdt.add_entry(x86_64::structures::gdt::Descriptor::user_data_segment());
     gdt.add_entry(x86_64::structures::gdt::Descriptor::user_code_segment());
 
     // Limine's choices
     gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_code_segment());
+
+    // TODO: unfuck whatever this is doing, cuz it's clearly not good
     // gdt.add_entry(x86_64::structures::gdt::Descriptor::kernel_data_segment());
 
-    gdt
-};
+    let selec = gdt.add_entry(x86_64::structures::gdt::Descriptor::tss_segment(
+        &TSS.get().unwrap(),
+    ));
 
-static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
+    GDT.set(gdt).unwrap();
 
-static mut TSS: TaskStateSegment = TaskStateSegment::new();
+    GDT.get().unwrap().load();
 
-pub fn init_interrupts() {
-    // TODO: Be able to register from somewhere else
-
-    // Unsafe cuz static mut, but otherwise valid, except sync
+    // ?????? Sure if it works
     unsafe {
-        IDT.page_fault.set_handler_fn(page_fault_handler);
-        IDT.divide_error.set_handler_fn(error);
-        IDT.debug.set_handler_fn(error);
-        IDT.non_maskable_interrupt.set_handler_fn(error);
-        IDT.breakpoint.set_handler_fn(error);
-        IDT.overflow.set_handler_fn(error);
-        IDT.bound_range_exceeded.set_handler_fn(error);
-        IDT.invalid_opcode.set_handler_fn(error);
-        IDT.device_not_available.set_handler_fn(error);
-        IDT.general_protection_fault.set_handler_fn(gpf);
-        IDT.double_fault.set_handler_fn(div);
-        IDT.invalid_tss.set_handler_fn(gpf);
-        IDT.segment_not_present.set_handler_fn(gpf);
-        IDT.stack_segment_fault.set_handler_fn(gpf);
-        IDT.x87_floating_point.set_handler_fn(error);
-        IDT.alignment_check.set_handler_fn(gpf);
-
-        // IDT.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(
-        //     switch_ctx as *const extern "C" fn() as u64,
-        // ));
-
-        IDT[20].set_handler_fn(crate::xhci::xhci_int);
-
-        IDT[130].set_handler_addr(x86_64::VirtAddr::new(
-            switch_ctx as *const extern "C" fn() as u64,
-        ));
-
-        IDT.load();
+        x86_64::registers::segmentation::SS::set_reg(data);
     }
-    println!("Setup the IDT");
+
+    unsafe {
+        x86_64::instructions::tables::load_tss(selec);
+    }
+    // println!("Setup the IDT");
 
     enable_x2apic();
-    println!("Setup the x2Apic");
+    // println!("Setup the x2Apic");
 
     x86_64::instructions::interrupts::enable();
-    println!("Enabled interrupts");
-
-    // TODO: Major bullshit, but fuck it
-    PROCS.lock().push(Process {
-        rflags: 0,
-        rsp: 0,
-        rip: lmao as *const extern "C" fn() -> ! as u64,
-        cs: 0x23,
-        ss: 0x1B,
-        regs: [0; 14],
-        cr3: get_cr3(),
-    });
+    // println!("Enabled interrupts");
 }
 
+// TODO: Hide behind api
 pub static ALLOC: spin::Mutex<Option<&mut crate::frame::Allocator>> =
     spin::Mutex::<Option<&mut crate::frame::Allocator>>::new(None);
 
 pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic]) {
+    crate::mm::virt::map_page(allocator, VirtAddr::new(0), PhysAddr::new(0));
     println!("Starting APs");
 
     // TODO: Reclaim bootloader and put somewhere more safe
@@ -449,6 +353,25 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
             .write(ap_init);
     }
 
+    println!(
+        "C43 {}",
+        x86_64::registers::control::Cr3::read()
+            .0
+            .start_address()
+            .as_u64()
+    );
+
+    unsafe {
+        (crate::phys_offset() + 0xFE0_u64)
+            .as_mut_ptr::<u64>()
+            .write(
+                x86_64::registers::control::Cr3::read()
+                    .0
+                    .start_address()
+                    .as_u64(),
+            );
+    }
+
     let mut error_reg = Msr::new(0x828);
     let mut ipi = Msr::new(0x830);
 
@@ -457,23 +380,23 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
         if apic.apic_id > 100 {
             continue;
         }
-        let mut init = InterprocessInterrupt(0)
+        let init = InterprocessInterrupt(0)
             .with_message_type(MessageType::Init)
             .with_level(true)
             .with_destination(apic.apic_id);
 
-        let mut init2 = InterprocessInterrupt(0)
+        let init2 = InterprocessInterrupt(0)
             .with_message_type(MessageType::Init)
             .with_destination(apic.apic_id);
 
-        let mut startup = InterprocessInterrupt(0)
+        let startup = InterprocessInterrupt(0)
             .with_message_type(MessageType::Startup)
             .with_level(true)
             .with_destination(apic.apic_id)
             .with_vec(0);
 
         unsafe {
-            let stack_addr = alloc_stack(allocator, apic.apic_id as usize);
+            let stack_addr = alloc_stack(allocator);
             (crate::phys_offset() + 0xFF0_u64)
                 .as_mut_ptr::<u64>()
                 .write(stack_addr);
@@ -493,81 +416,9 @@ pub fn init_multicore(allocator: &mut crate::frame::Allocator, apics: &[X2Apic])
         }
     }
     println!("Enabled all cpus");
-
-    unsafe {
-        TSS.privilege_stack_table[0] = VirtAddr::new(alloc_stack(allocator, 32));
-
-        let selec = GDT.add_entry(x86_64::structures::gdt::Descriptor::tss_segment(&TSS));
-
-        GDT.load();
-
-        x86_64::instructions::tables::load_tss(selec);
-    }
-
-    PROCS.lock().push(Process {
-        rflags: 0,
-        rsp: alloc_stack(allocator, 30),
-        rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-        cs: 0x23,
-        ss: 0x1B,
-        regs: [0; 14],
-        cr3: get_cr3(),
-    });
-
-    PROCS.lock().push(Process {
-        rflags: 0,
-        rsp: alloc_stack(allocator, 31),
-        rip: unsafe { lmao as *const extern "C" fn() -> ! as u64 },
-        cs: 0x23,
-        ss: 0x1B,
-        regs: [0; 14],
-        cr3: get_cr3(),
-    });
 }
 
 pub fn init_runtime() {
-    {
-        let mut alloc = ALLOC.lock();
-        let allocator = alloc.as_mut().unwrap();
-
-        unsafe {
-            TSS.privilege_stack_table[0] = VirtAddr::new(alloc_stack(allocator, 32));
-
-            let selec = GDT.add_entry(x86_64::structures::gdt::Descriptor::tss_segment(&TSS));
-
-            GDT.load();
-            // SS not used in ring 0, so we disappoint limine
-            // x86_64::registers::segmentation::SS
-
-            x86_64::instructions::tables::load_tss(selec);
-        }
-
-        PROCS.lock().push(Process {
-            rflags: 0,
-            rsp: alloc_stack(allocator, 30),
-            rip: lmao as *const extern "C" fn() -> ! as u64,
-        cs: 0x23,
-        ss: 0x1B,
-            regs: [0; 14],
-            cr3: get_cr3(),
-        });
-
-        PROCS.lock().push(Process {
-            rflags: 0,
-            rsp: alloc_stack(allocator, 31),
-            rip: lmao as *const extern "C" fn() -> ! as u64,
-        cs: 0x23,
-        ss: 0x1B,
-            regs: [0; 14],
-            cr3: get_cr3(),
-        });
-
-        unsafe {
-            asm!("mov gs, {:r}", in(reg) 0);
-        }
-        PROC_QUEUE.lock().put(1);
-    }
-
     let mut timer_vec: LocalVec = 0.into();
     // timer_vec.set_timer_mode(true);
     timer_vec.set_vec(130);
@@ -576,13 +427,13 @@ pub fn init_runtime() {
     unsafe {
         timer_vec_reg.write(timer_vec.into());
     }
-    println!("Got past timer vec");
+    // println!("Got past timer vec");
 
     let mut divide = Msr::new(0x83E);
     unsafe {
         divide.write(0);
     }
-    println!("Got past divider");
+    // println!("Got past divider");
 
     // 1 Secs at 4 Ghz
     let timer_initial: u64 = 4000000000;
@@ -590,47 +441,9 @@ pub fn init_runtime() {
     unsafe {
         timer_initial_reg.write(timer_initial);
     }
-    println!("Got past initial timer");
+    // println!("Got past initial timer");
 
-    let mut timer_current = Msr::new(0x839);
-    let current = unsafe { timer_current.read() };
-    println!("{}", current);
-
-    let mut timer_current = Msr::new(0x839);
-    let current = unsafe { timer_current.read() };
-    println!("{}", current);
-
-    loop {}
-}
-
-#[derive(Debug)]
-struct LoopedQueue {
-    arr: [u64; 4096],
-    cur: usize,
-    last: usize,
-}
-
-impl LoopedQueue {
-    const fn new() -> Self {
-        Self {
-            arr: [0; 4096],
-            cur: 0,
-            last: 0,
-        }
-    }
-
-    fn put(&mut self, t: u64) {
-        self.arr[self.cur] = t;
-        self.cur = (self.cur + 1) % 4096;
-    }
-
-    fn take(&mut self) -> Option<u64> {
-        if self.cur == self.last {
-            return None;
-        }
-
-        let val = self.arr[self.last];
-        self.last = (self.last + 1) % 4096;
-        Some(val)
-    }
+    // let mut timer_current = Msr::new(0x839);
+    // let current = unsafe { timer_current.read() };
+    // println!("{}", current);
 }

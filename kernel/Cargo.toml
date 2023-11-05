@@ -19,6 +19,7 @@ x86_64 = "0.14.10"
 proc-bitfield = "0.2.2"
 bytemuck = "1.13.0"
 bitflags = "2.0.1"
+atomkern-abi = { path = "../abi/" }
 
 [dependencies.num_enum]
 version = "0.5.9"
@@ -48,4 +49,4 @@ features = ["unstable-core-error", "unstable-try-trait"]
 
 [build-dependencies]
 nasm-rs = "0.2.4"
-cc = "1.0"
+# cc = "1.0"

@@ -100,7 +100,7 @@ impl<P: pixel::Color> Writer<P> {
                 P::from_channels(&[255, 181, 141, 255])
             } else {
                 // P::from_channels(&[89, 246, 247, 1])
-                P::from_channels(&[90, 90, 90, 255])
+                P::from_channels(&[19, 19, 19, 255])
             }
         }
         pixels
@@ -173,7 +173,7 @@ impl<P: pixel::Color> Writer<P> {
 
 static WRITER: Mutex<Option<Writer<pixel::RGBA>>> = Mutex::new(None);
 
-pub fn init(info: &limine::LimineFramebuffer) {
+pub fn init(info: &limine::Framebuffer) {
     *WRITER.lock() = Some(Writer {
         buffer: CellBuffer {
             buffer: pixel::Buffer {
@@ -202,8 +202,5 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    // unsafe {
-    //     WRITER.force_unlock();
-    // }
     WRITER.lock().as_mut().unwrap().write_fmt(args).unwrap();
 }

@@ -5,6 +5,7 @@ extern syscall_handler_rs
 global switch_ctx
 global create_lmao
 global syscall_handler
+global sysret_executor
 
 switch_ctx:
     ; Step 1: Push everything onto the stack
@@ -75,8 +76,35 @@ create_lmao:
 
 syscall_handler:
 ; manually preserve rflags stored in r11
+    cli
     push r11
+    push rcx
     call syscall_handler_rs
+    pop rcx
+    pop r11
+    ; jmp $
+    sti
+    o64 sysret
 
 sysret_executor:
-    
+    ; switch to user stack
+    mov rsp, rdi
+    ; TLS image address, passed as metadata on heap
+
+    mov rdi, 5
+    copy:
+    	dec rdi
+	
+	push qword [rcx + rdi * 8]
+	
+    	cmp rdi, 0
+    	jne copy
+
+    ; ptr to metadata is sysv abi param 1
+    mov rdi, rsp
+
+    ; sysret params
+    mov rcx, rsi
+    mov r11, rdx
+
+    o64 sysret

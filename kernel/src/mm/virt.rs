@@ -1,10 +1,10 @@
+use crate::phys_offset;
 use crate::println;
 use bitflags::bitflags;
 use bitvec::prelude::*;
 use bytemuck::TransparentWrapper;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::bitfield;
-use crate::phys_offset;
 use x86_64::{
     registers,
     registers::model_specific::Msr,
@@ -136,6 +136,39 @@ pub fn addr_to_table(addr: x86_64::PhysAddr) -> &'static mut PageTable {
     unsafe { &mut *page_table_ptr }
 }
 
+pub fn virt_to_phys(addr: x86_64::VirtAddr) -> x86_64::PhysAddr {
+    // println!("map_page");
+    let pml4 = unsafe { active_page_table() };
+    let int = addr.as_u64();
+    let bits = int.view_bits::<Lsb0>();
+    // println!("{:?}", bits);
+    let a0 = bits[0..12].load::<u16>();
+    let l1 = bits[12..21].load::<u16>();
+    let l2 = bits[21..30].load::<u16>();
+    let l3 = bits[30..39].load::<u16>();
+    let l4 = bits[39..48].load::<u16>();
+    // println!("{l1}, {l2}, {l3}, {l4}");
+    // println!("{:?}", pml4[l1 as usize]);
+
+    let level3 = &mut pml4[l4 as usize];
+    let level3 = addr_to_table(level3.addr());
+
+    let level2 = &mut level3[l3 as usize];
+    if level2.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return level2.addr();
+    }
+    let level2 = addr_to_table(level2.addr());
+
+    let level1 = &mut level2[l2 as usize];
+    if level1.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return level1.addr();
+    }
+    let level1 = addr_to_table(level1.addr());
+
+    let entry = &mut level1[l1 as usize];
+    x86_64::PhysAddr::new(entry.addr().as_u64() + a0 as u64)
+}
+
 pub fn map_page(
     allocator: &mut crate::frame::Allocator,
     addr: x86_64::VirtAddr,
@@ -244,9 +277,7 @@ pub fn proper_map_page(
     frame: x86_64::PhysAddr,
     flags: MapFlags,
 ) {
-    let pml4 = unsafe {
-        &mut *(phys_offset() + page_table.as_u64()).as_mut_ptr::<PageTable>()
-    };
+    let pml4 = unsafe { &mut *(phys_offset() + page_table.as_u64()).as_mut_ptr::<PageTable>() };
 
     // println!("map_page");
     let int = addr.as_u64();
@@ -264,10 +295,7 @@ pub fn proper_map_page(
         !flags.contains(MapFlags::Executable),
     );
 
-    page_flags.set(
-        PageTableFlags::WRITABLE,
-        flags.contains(MapFlags::Writable),
-    );
+    page_flags.set(PageTableFlags::WRITABLE, flags.contains(MapFlags::Writable));
 
     page_flags.set(
         PageTableFlags::USER_ACCESSIBLE,
@@ -284,10 +312,7 @@ pub fn proper_map_page(
     if level3.addr().is_null() {
         let addr = allocator.allocate().unwrap();
         // println!("{:?}", addr);
-        level3.set_addr(
-            addr,
-            page_flags,
-        );
+        level3.set_addr(addr, page_flags);
         let level3 = addr_to_table(level3.addr());
         level3.zero();
     }
@@ -306,10 +331,7 @@ pub fn proper_map_page(
     if level2.addr().is_null() {
         let addr = allocator.allocate().unwrap();
         // println!(" alloc for l2 {:?}", addr);
-        level2.set_addr(
-            addr,
-            page_flags,
-        );
+        level2.set_addr(addr, page_flags);
         let level2 = addr_to_table(level2.addr());
         level2.zero();
     }
@@ -328,10 +350,7 @@ pub fn proper_map_page(
     if level1.addr().is_null() {
         let addr = allocator.allocate().unwrap();
         // println!("alloc for l1 {:?}", addr);
-        level1.set_addr(
-            addr,
-            page_flags,
-        );
+        level1.set_addr(addr, page_flags);
         let level1 = addr_to_table(level1.addr());
         level1.zero();
     }
@@ -344,10 +363,7 @@ pub fn proper_map_page(
     }
 
     let entry = &mut level1[l1 as usize];
-    entry.set_addr(
-        frame,
-        page_flags,
-    );
+    entry.set_addr(frame, page_flags);
     // println!("eeee{:?}", entry);
 
     // println!("{:?} {:?} {:?} {:?}", level3, level2, level1, entry);
