@@ -1,3 +1,5 @@
+#![no_std]
+
 #![feature(int_roundings)]
 #![feature(pointer_byte_offsets)]
 #![feature(inline_const)]
@@ -9,12 +11,17 @@
 use array_init::array_init;
 use bitvec::array::BitArray;
 use bitvec::prelude::*;
-use core::cell::RefCell;
 use core::ptr::null_mut;
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::*;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
-use mmap_fixed::{MapOption, MemoryMap};
+// use mmap_fixed::{MapOption, MemoryMap};
+use atomkern_abi::do_syscall;
+use cell_family::Cell;
+use cell_family::Family;
+use cell_family::CellOwner;
+
+pub use cell_family;
 
 // TODO: Extract size to wordsize into function since it's kinda complex actually
 
@@ -30,7 +37,9 @@ const MEDIUM_PAGE_SIZE: usize = SLICE_SIZE * 8;
 const SMALL_OBJ_MAX_SIZE: usize = SMALL_PAGE_SIZE / 4;
 const MEDIUM_OBJ_MAX_SIZE: usize = MEDIUM_PAGE_SIZE / 4;
 
-const META_SLICE_COUNT: usize = core::mem::size_of::<SegmentMeta>().div_ceil(SLICE_SIZE);
+// dummy type because the size should not vary
+cell_family::define!(type Dummy: DummyOwner for DummyCell<T>);
+const META_SLICE_COUNT: usize = core::mem::size_of::<SegmentMeta<Dummy>>().div_ceil(SLICE_SIZE);
 
 const SLICE_MAP_VALUE_COUNT: usize = SLICES_PER_SEGMENT.div_ceil(64);
 
@@ -50,18 +59,18 @@ type SliceMap = BitArray<[u64; SLICE_MAP_VALUE_COUNT], Lsb0>;
 // We could save a bit by not ever storing the metadata pages, but that'd have recursive (if
 // limited) effects, and makes calculations more difficult, providing little benefit in terms of
 // metadata overhead
-struct SegmentMeta {
+struct SegmentMeta<Key: Family> {
     // Should this count the pages in use or slices in use
     used: usize,
     used_map: SliceMap,
-    slice_meta: [SliceMeta; SLICES_PER_SEGMENT],
+    slice_meta: [SliceMeta<Key>; SLICES_PER_SEGMENT],
 }
 // First few slices are used by metaata
 //
 type PageId = usize;
 type SegmentId = usize;
 
-impl SegmentMeta {
+impl<Key: Family> SegmentMeta<Key> {
     // Great way to blow up the stack, causing the one thing rust doesn't properly protect against
     // (except my stupidity that is)
     fn new() -> Self {
@@ -99,7 +108,7 @@ impl SegmentMeta {
     // should be valid, but this design aspect obviously undermines quite a bit of rusts safety
     // The total lack of mutable on the params makes this an even bigger safety nightmare,
     // but we need to make it work ¯\_(ツ)_/¯
-    fn get_page_data(&self, owner: &mut SliceOwner, page: &SliceMeta) -> &mut [Block] {
+    fn get_page_data(&self, owner: &mut CellOwner<Key>, page: &SliceMeta<Key>) -> &mut [Block] {
         let page_addr = addr_of!(*page);
         let arr_addr = addr_of!(self.slice_meta[0]);
 
@@ -116,12 +125,12 @@ impl SegmentMeta {
         unsafe {
             core::slice::from_raw_parts_mut(
                 start_ptr,
-                page_kind_to_size(page.data.get(owner).kind) / std::mem::size_of::<Block>(),
+                page_kind_to_size(page.data.get(owner).kind) / core::mem::size_of::<Block>(),
             )
         }
     }
 
-    fn get_id_data(&self, owner: &SliceOwner, id: PageId) -> &mut [Block] {
+    fn get_id_data(&self, owner: & CellOwner<Key>, id: PageId) -> &mut [Block] {
         let start_ptr = unsafe {
             addr_of!(*self)
                 .byte_add(id * SLICE_SIZE)
@@ -134,12 +143,12 @@ impl SegmentMeta {
         unsafe {
             core::slice::from_raw_parts_mut(
                 start_ptr,
-                page_kind_to_size(page.data.get(owner).kind) / std::mem::size_of::<Block>(),
+                page_kind_to_size(page.data.get(owner).kind) / core::mem::size_of::<Block>(),
             )
         }
     }
 
-    fn get_page(&self, id: PageId) -> &SliceMeta {
+    fn get_page(&self, id: PageId) -> &SliceMeta<Key> {
         &self.slice_meta[id]
     }
 
@@ -171,7 +180,7 @@ enum PageKind {
     Large,
 }
 
-cell_family::define!(type SliceMarker: SliceOwner for SliceCell<T>);
+// cell_family::define!(type SliceMarker: SliceOwner for SliceCell<T>);
 
 #[derive(Debug)]
 struct SliceMetaInner {
@@ -198,16 +207,16 @@ struct SliceMetaInner {
 // This primarily contains information about a page, but because it's stored for every slice we
 // refer to it by the term slice
 // #[derive(Debug)]
-struct SliceMeta {
+struct SliceMeta<Key: Family> {
     link: LinkedListLink,
-    data: SliceCell<SliceMetaInner>,
+    data: Cell<Key, SliceMetaInner>,
 }
 
-impl std::fmt::Debug for SliceMeta {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.write_fmt(format_args!("SliceMeta: link: {:?}", self.link))
-    }
-}
+// impl core::fmt::Debug for SliceMeta<Key> {
+//     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
+//         f.write_fmt(format_args!("SliceMeta: link: {:?}", self.link))
+//     }
+// }
 
 impl SliceMetaInner {
     fn is_empty(self: &Self) -> bool {
@@ -303,11 +312,11 @@ impl SliceMetaInner {
     }
 }
 
-impl SliceMeta {
+impl<Key: Family> SliceMeta<Key> {
     const fn new() -> Self {
         Self {
             link: LinkedListLink::new(),
-            data: SliceCell::new(SliceMetaInner {
+            data: Cell::<Key, _>::new(SliceMetaInner {
                 kind: PageKind::Small,
                 used: 0,
                 free_block_list: usize::MAX,
@@ -319,12 +328,12 @@ impl SliceMeta {
         }
     }
 
-    fn is_empty(self: &Self, owner: &mut SliceOwner) -> bool {
+    fn is_empty(self: &Self, owner: &mut CellOwner<Key>) -> bool {
         self.data.get(owner).is_empty()
     }
 
     // Deduplicate the map lmao
-    fn try_alloc(self: &Self, owner: &mut SliceOwner, slice_data: &mut [Block]) -> Option<*mut u8> {
+    fn try_alloc(self: &Self, owner: &mut CellOwner<Key>, slice_data: &mut [Block]) -> Option<*mut u8> {
         self.data.get_mut(owner).try_alloc(slice_data)
     }
 }
@@ -344,17 +353,17 @@ const WORD_SIZE: usize = 8;
 
 const BIN_COUNT: usize = 73;
 
-intrusive_adapter!(PageAdapter<'a> = &'a SliceMeta: SliceMeta { link: LinkedListLink });
+intrusive_adapter!(PageAdapter<'a, Key> = &'a SliceMeta<Key>: SliceMeta<Key> { link: LinkedListLink } where Key: Family);
 
-struct Queue<'a> {
-    list: LinkedList<PageAdapter<'a>>,
+struct Queue<'a, Key: Family> {
+    list: LinkedList<PageAdapter<'a, Key>>,
     size: usize,
 }
 
-impl Queue<'_> {
+impl<Key: Family> Queue<'_, Key> {
     fn new() -> Self {
         Self {
-            list: LinkedList::new(PageAdapter::new()),
+            list: LinkedList::new(PageAdapter::<Key>::new()),
             size: 0,
         }
     }
@@ -363,15 +372,15 @@ impl Queue<'_> {
 // Awful trick copied from mimalloc that relies on segments being 4 MiB aligned, which they should
 // be, but we really have no way of verifying that
 // I do not have the smallest clue how that livetime makes it work, but if it works, sure, great
-fn get_segment<'a>(page: &SliceMeta) -> &'a mut SegmentMeta {
-    unsafe { &mut *(((addr_of!(*page) as usize) & !(0x400000 - 1)) as *mut SegmentMeta) }
+fn get_segment<'a, Key: Family>(page: &SliceMeta<Key>) -> &'a mut SegmentMeta<Key> {
+    unsafe { &mut *(((addr_of!(*page) as usize) & !(0x400000 - 1)) as *mut SegmentMeta<Key>) }
 }
 
 // TODO: Abstract over custom marker types to enable multiple instances
-pub struct Heap<'a> {
+pub struct Heap<'a, Key: Family> {
     // TODO: Just store reference, we have interior mutability anyway
-    small_size_map: [*const SliceMeta; SMALL_SIZE_BIN_COUNT],
-    bin_map: [Queue<'a>; BIN_COUNT],
+    small_size_map: [*const SliceMeta<Key>; SMALL_SIZE_BIN_COUNT],
+    bin_map: [Queue<'a, Key>; BIN_COUNT],
     // full_bin: Queue<'a>,
 
     // small_free: Queue<'static>,
@@ -379,11 +388,11 @@ pub struct Heap<'a> {
     small_free_bm: FreeBm,
     medium_large_free_bm: FreeBm,
 
-    owner: SliceOwner,
+    owner: CellOwner<Key>,
 }
 
-impl Heap<'_> {
-    fn new() -> Self {
+impl<Key: Family> Heap<'_, Key> {
+    pub fn new() -> Self {
         Self {
             small_size_map: [null_mut(); SMALL_SIZE_BIN_COUNT],
             bin_map: array_init(|_| Queue::new()),
@@ -394,7 +403,7 @@ impl Heap<'_> {
             small_free_bm: FreeBm::new([0u64; 64]),
             medium_large_free_bm: FreeBm::new([0u64; 64]),
 
-            owner: SliceOwner::new(),
+            owner: CellOwner::<Key>::new(),
         }
     }
 
@@ -412,7 +421,8 @@ impl Heap<'_> {
             // TODO: Implement large object handling as early return
             //       => Can't move it to Arena because the user should not have direct access to
             //       arena and should also not have to check for the object size themselves
-            return null_mut();
+            // return null_mut();
+            unimplemented!();
         }
 
         let bin = size_to_bin(size);
@@ -438,13 +448,13 @@ impl Heap<'_> {
         let data = segment.get_id_data(&self.owner, page_id);
 
         let bin_wsize = E[bin as usize];
-        println!("SegmentId {segment_id} PageId {page_id}");
+        // println!("SegmentId {segment_id} PageId {page_id}");
         self.bin_map[bin as usize].list.push_back(page);
 
         if wsize < SMALL_WORDSIZE_MAX {
             // TODO: Clean up lmao + Refactor to big PageId
             let prev_bin_wsize = E[bin as usize - 1];
-            println!("prev_bin_wsize {prev_bin_wsize}, bin_wsize {bin_wsize}");
+            // println!("prev_bin_wsize {prev_bin_wsize}, bin_wsize {bin_wsize}");
 
             for slot in &mut self.small_size_map
                 [prev_bin_wsize + if prev_bin_wsize == 0 { 0 } else { 1 }..(bin_wsize + 1).min(128)]
@@ -475,7 +485,7 @@ impl Heap<'_> {
         {
             segment_id = index;
 
-            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta;
+            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta<Key>;
             segment = unsafe { ptr.as_mut().unwrap() };
 
             // TODO: Exactly this is problematic it causes a bunch of all over the place bs and
@@ -486,17 +496,17 @@ impl Heap<'_> {
         } else if let Some(index) = self.medium_large_free_bm.first_one() {
             segment_id = index;
 
-            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta;
+            let ptr = (0x3EC0000000 + SEGMENT_SIZE * index) as *mut SegmentMeta<Key>;
             segment = unsafe { ptr.as_mut().unwrap() };
 
             // TODO: This always loses the entire 8 slices even if only 1 ends up getting
             // used
-            println!("used {}", segment.used);
+            // println!("used {}", segment.used);
             if segment.used + 8 > 504 {
                 *self.medium_large_free_bm.get_mut(index).unwrap() = false;
             }
         } else {
-            let ptr = ARENA.alloc() as *mut SegmentMeta;
+            let ptr = ARENA.alloc() as *mut SegmentMeta<Key>;
             segment = unsafe { ptr.as_mut().unwrap() };
             *segment = SegmentMeta::new();
 
@@ -549,15 +559,15 @@ struct Arena {
     dirty: [AtomicU64; 64],
     used: [AtomicU64; 64],
     // Has to be 4MiB aligned, due to segment_from_page shenaniganry
-    start: AtomicPtr<SegmentMeta>,
+    start: AtomicPtr<u8>,
 }
 
 const BLOCK_SIZE: usize = SEGMENT_SIZE;
 
 impl Arena {
-    fn alloc(&self) -> *mut SegmentMeta {
+    fn alloc(&self) -> *mut u8 {
         if let Some(index) = self.try_find_claim() {
-            println!("{}", index);
+            // println!("{}", index);
             return unsafe {
                 self.start
                     .load(Ordering::Relaxed)
@@ -594,7 +604,7 @@ impl Arena {
             if let Ok(_) =
                 value.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
-                println!("i {} bitidx {}", i, leading);
+                // println!("i {} bitidx {}", i, leading);
                 return Some(i as u64 * 64 + leading as u64);
             }
         }
@@ -644,59 +654,66 @@ impl Arena {
             block_count: AtomicUsize::new(0),
             dirty: [const { AtomicU64::new(!0) }; 64],
             used: [const { AtomicU64::new(!0) }; 64],
-            start: AtomicPtr::new(0x3EC0000000 as *mut SegmentMeta),
+            start: AtomicPtr::new(0x3EC0000000 as *mut u8),
         }
     }
 
     // TODO: Ensure that SegmentMeta size != Segment size never happens again
-    fn ptr_to_id(&self, ptr: *const SegmentMeta) -> SegmentId {
+    fn ptr_to_id<Key: Family>(&self, ptr: *const SegmentMeta<Key>) -> SegmentId {
         unsafe { ptr.byte_offset_from(self.start.load(Ordering::Relaxed)) }.unsigned_abs()
             / SEGMENT_SIZE
     }
 
     // TODO: This is unsafe with the prerequisite of the Segment being owned by the same thread
     // that is calling this
-    fn get_segment_mut(&self, id: SegmentId) -> &mut SegmentMeta {
+    fn get_segment_mut<Key: Family>(&self, id: SegmentId) -> &mut SegmentMeta<Key> {
         unsafe {
             self.start
                 .load(Ordering::Relaxed)
                 .byte_add(id * SEGMENT_SIZE)
+                .cast::<SegmentMeta<Key>>()
                 .as_mut()
                 .unwrap()
         }
     }
 }
 
-thread_local! {
-    // TODO: Make not use fixed addr allocs
-    pub static TLD: RefCell<*mut Tld<'static>> = RefCell::new(init());
-}
+// thread_local! {
+//     // TODO: Make not use fixed addr allocs
+//     pub static TLD: RefCell<*mut Tld<'static>> = RefCell::new(init());
+// }
+
+// #[thread_local]
+// pub static TLD: Tld = Tld::new();
 
 fn sys_alloc(addr: u64, size: u64) {
-    std::mem::forget(
-        MemoryMap::new(
-            size as usize,
-            &[
-                MapOption::MapAddr(addr as *mut u8),
-                MapOption::MapWritable,
-                MapOption::MapReadable,
-            ],
-        )
-        .unwrap(),
-    );
+    // std::mem::forget(
+    //     MemoryMap::new(
+    //         size as usize,
+    //         &[
+    //             MapOption::MapAddr(addr as *mut u8),
+    //             MapOption::MapWritable,
+    //             MapOption::MapReadable,
+    //         ],
+    //     )
+    //     .unwrap(),
+    // );
+    unsafe {
+        do_syscall(2, 0, addr, 0, size.div_ceil(0x1000));
+    }
 }
 
-pub struct Tld<'a> {
-    pub heap: Heap<'a>,
-}
+// pub struct Tld<'a> {
+//     pub heap: Heap<'a>,
+// }
 
 static ARENA: Arena = Arena::new();
 
-impl Tld<'_> {
-    fn new() -> Self {
-        Self { heap: Heap::new() }
-    }
-}
+// impl Tld<'_> {
+//     fn new() -> Self {
+//         Self { heap: Heap::new() }
+//     }
+// }
 
 const E: [usize; 75] = [
     0, // Should not be relevant, could be anything
@@ -802,14 +819,4 @@ fn size_to_bin(size: usize) -> u8 {
 
 fn size_to_wsize(size: usize) -> usize {
     size.div_ceil(WORD_SIZE)
-}
-
-fn init() -> *mut Tld<'static> {
-    // randomly guess for good measure lmao
-    sys_alloc(0x1EC0000000, 20);
-    let ptr = std::ptr::from_exposed_addr_mut::<Tld<'static>>(0x1EC0000000);
-
-    // let ptr = 0x1EC0000000 as *mut Tld;
-    *unsafe { ptr.as_mut().unwrap() } = Tld::new();
-    ptr
 }
