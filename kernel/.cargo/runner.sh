@@ -61,8 +61,9 @@ qemu-system-x86_64 \
         --trace net_* \
  \
         -device qemu-xhci,id=xhci \
-        -netdev user,id=user,hostfwd=tcp::2222-:22 \
+        -netdev user,id=user,hostfwd=tcp::2222-:6970 \
         -net nic,netdev=user,model=virtio-net-pci-non-transitional \
+	-object filter-dump,id=user,netdev=user,file=packetdump \
  \
     $KERNEL.iso
 
