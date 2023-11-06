@@ -10,11 +10,8 @@
 use bitflags::bitflags;
 use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
-use log::{Level, LevelFilter};
 use num_enum::*;
 use proc_bitfield::bitfield;
-// use std::fmt::Write;
-use std::io::Write;
 use std::mem::size_of;
 use std::ptr::{addr_of, addr_of_mut, from_exposed_addr, null_mut};
 
@@ -85,7 +82,7 @@ pub struct Common {
     dev_status: Status,
     config_generation: u8,
 
-    // I wanna know who in gods name thought this was a good idea
+    // This is essentially a configure command not modifiable queue states
     queue: Queue,
 }
 
@@ -196,12 +193,6 @@ bitflags! {
     }
 }
 
-fn map_pcie_bar(ptrs: Ptrs) {
-    unsafe {
-        abi::do_syscall(12, addr_of!(ptrs) as u64, 0, 0, 0);
-    }
-}
-
 fn get_phys_addr(ptr: *mut u8) -> u64 {
     unsafe { abi::do_syscall(14, ptr as u64, 0, 0, 0) }
 }
@@ -292,44 +283,22 @@ impl<'b> phy::Device for Dev<'b> {
     type RxToken<'a> = StmPhyRxToken<'a> where Self: 'a;
     type TxToken<'a> = StmPhyTxToken<'a> where Self: 'a;
 
+    // I do not like the token reference galore, but it is what it is, smoltcp is saving my ass
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        // TODO: Somehow move into the token
-        // Why the fuck anyone design something like that
-        // that's just fucking reference galore
-        // whyyy
-        let queue = &mut self.queues[0];
+        let (rxqueue, rest) = self.queues.split_first_mut().unwrap();
+        let (txqueue, _) = rest.split_last_mut().unwrap();
 
         // used.idx is one past
-        if queue.last_used != queue.used.idx {
-            let elem =
-                unsafe { addr_of!(queue.used.ring[queue.last_used as usize]).read_volatile() };
-            println!("{:?}", elem);
+        if rxqueue.last_used != rxqueue.used.idx {
+            let txprev = txqueue.last_used;
+            txqueue.last_used += 2;
 
-            let ptr = queue.fuckwit[elem.id as usize];
-            println!("{:?}", unsafe { &mut *ptr.cast::<NetHeader>() });
-
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut::<u8>(
-                    queue.fuckwit[elem.id as usize].byte_add(size_of::<NetHeader>()),
-                    elem.len as usize - size_of::<NetHeader>(),
-                )
-            };
-
-            let mut arr = vec![];
-
-            for b in &mut *slice {
-                core::ascii::escape_default(*b).collect_into(&mut arr);
-            }
-            println!("data {}", core::str::from_utf8(arr.as_slice()).unwrap());
-
-            queue.last_used += 1;
-
-            let prev = self.queues[1].last_used;
-            self.queues[1].last_used += 2;
+            let rxprev = rxqueue.last_used;
+            rxqueue.last_used += 1;
 
             return Some((
-                StmPhyRxToken(slice),
-                StmPhyTxToken(&mut self.queues[1], prev, prev + 1),
+                StmPhyRxToken(rxqueue, rxprev),
+                StmPhyTxToken(txqueue, txprev, txprev + 1),
             ));
         }
         None
@@ -351,16 +320,40 @@ impl<'b> phy::Device for Dev<'b> {
     }
 }
 
-struct StmPhyRxToken<'a>(&'a mut [u8]);
+struct StmPhyRxToken<'a>(&'a mut AbstractQueue, u16);
 
 impl<'a> phy::RxToken for StmPhyRxToken<'a> {
     fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        // TODO: receive packet into buffer
-        let result = f(&mut self.0);
-        println!("rx called");
+        let queue = self.0;
+        let id = self.1;
+
+        let elem = unsafe { addr_of!(queue.used.ring[id as usize]).read_volatile() };
+        println!("{:?}", elem);
+
+        // let ptr = queue.uspace_ptrs[elem.id as usize];
+        // println!("{:?}", unsafe { &mut *ptr.cast::<NetHeader>() });
+
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut::<u8>(
+                queue.uspace_ptrs[elem.id as usize].byte_add(size_of::<NetHeader>()),
+                elem.len as usize - size_of::<NetHeader>(),
+            )
+        };
+
+        // let mut arr = vec![];
+
+        // for b in &mut *slice {
+        //     core::ascii::escape_default(*b).collect_into(&mut arr);
+        // }
+        // println!("data {}", core::str::from_utf8(arr.as_slice()).unwrap());
+
+        let result = f(slice);
+
+        // TODO: Acknowledge that the desc have been read to the device
+
         result
     }
 }
@@ -379,13 +372,8 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
         let desc = &mut queue.descs[id as usize];
         desc.length = (size + len) as u32;
         desc.flags = 0;
-        // desc.next = self.2;
-        // desc.
-        //
-        // let desc = &mut queue.descs[self.2 as usize];
-        // desc.length = 10;
 
-        let ptr = queue.fuckwit[id as usize];
+        let ptr = queue.uspace_ptrs[id as usize];
         unsafe {
             ptr.cast::<NetHeader>().write(NetHeader {
                 flags: 0,
@@ -398,14 +386,13 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
             });
         }
 
-        // let ptr = queue.fuckwit[self.2 as usize];
-        let slice = unsafe { core::slice::from_raw_parts_mut::<u8>(ptr.byte_add(size), 1536 - size) };
+        let slice =
+            unsafe { core::slice::from_raw_parts_mut::<u8>(ptr.byte_add(size), 1536 - size) };
 
         let result = f(&mut slice[..len]);
         println!("tx called {}", len);
 
         queue.avail.ring[queue.avail.idx as usize] = id;
-        // queue.avail.ring[queue.avail.idx as usize + 1] = self.2;
         queue.avail.idx += 1;
 
         unsafe {
@@ -423,33 +410,34 @@ struct Dev<'a> {
     notif: *mut u8,
 }
 
+// TODO: Make monadic or something cuz monads are cute
+fn map_pcie_config(ptr: *mut u8) {
+    unsafe {
+        abi::do_syscall(12, ptr as u64, 0, 0, 0);
+    }
+}
+
 impl<'a> Dev<'a> {
     fn init() -> Self {
-        let mut vec = vec![0_u8; 0x5000];
-        let stupi_ptr = vec.as_mut_ptr();
+        let mut cfg = vec![0_u8; 4096];
+        map_pcie_config(cfg.as_mut_ptr());
+        let config = unsafe { &mut *(cfg.as_mut_ptr() as *mut VirtioConfig) };
 
-        let ptrs = Ptrs {
-            cfg: stupi_ptr,
-            common: unsafe { stupi_ptr.byte_offset(0x1000) },
-            msi: unsafe { stupi_ptr.byte_offset(0x2000) },
-            pba: unsafe { stupi_ptr.byte_offset(0x3000) },
-            notif: unsafe { stupi_ptr.byte_offset(0x4000) },
-        };
-
-        map_pcie_bar(ptrs);
-        let config = unsafe { &mut *(ptrs.cfg as *mut VirtioConfig) };
-
-        let mut base = unsafe { addr_of_mut!(*ptrs.cfg).cast::<CapabilityHeader>() };
+        let base = unsafe { addr_of_mut!(*cfg.as_mut_ptr()).cast::<CapabilityHeader>() };
         let mut caps_ptr = unsafe { base.byte_offset(config.capabilities_ptr.into()) };
 
+        // TODO: Solve memory wasting
+        std::mem::forget(cfg);
+
+        // TODO: Extract this into pcie library
         let mut msi = None;
         let mut common = None;
         let mut notif = None;
         // Int#x
-        let mut isr = None;
-        let mut device = None;
+        let mut _isr = None;
+        let mut _device = None;
         // Suboptimal access method
-        let mut pci = None;
+        let mut _pci = None;
         loop {
             let caps = unsafe { &*caps_ptr };
             println!("caps: {:?}", caps);
@@ -461,9 +449,9 @@ impl<'a> Dev<'a> {
                 match vendor.cfg_type {
                     1 => common = Some(vendor),
                     2 => notif = Some(vendor),
-                    3 => isr = Some(vendor),
-                    4 => device = Some(vendor),
-                    5 => pci = Some(vendor),
+                    3 => _isr = Some(vendor),
+                    4 => _device = Some(vendor),
+                    5 => _pci = Some(vendor),
                     _ => unreachable!(),
                 }
             }
@@ -472,20 +460,92 @@ impl<'a> Dev<'a> {
             }
             caps_ptr = unsafe { base.byte_offset(caps.next.into()) };
         }
+
+        let mut bars = vec![];
+
         // assume notif thingy is 0
         println!("{:?}", notif.unwrap());
         // loop {}
 
         let msi = msi.unwrap();
 
+        bars.push(msi.pending.bar());
+        bars.push(msi.table.bar());
+        bars.push(common.unwrap().bar);
+        bars.push(notif.unwrap().bar);
+
+        bars.sort();
+        bars.dedup();
+
+        // TODO: Turn into mmio alloc
+        fn alloc_map_phys(ptr: *mut u8, size: usize, small: bool) -> u64 {
+            unsafe {
+                // TODO: Turn syscall types into a proper api
+                abi::do_syscall(16, ptr as u64, size as u64, 0, small as u64)
+            }
+        }
+
+        let mut bar_ptrs = vec![null_mut(); 8];
+        for bar_id in bars {
+            let bar = &mut config.bars[bar_id as usize];
+
+            if bar.is_io() {
+                // TODO: Actually alloc some io space
+                continue;
+            }
+
+            // The device automatically sets all bits that violate alignment to 0, so you can
+            // figure out the alignment by writing a set bit to the entire address
+
+            // unsafe {
+            //     addr_of_mut!(config.bars[bar_id as usize])
+            //         .cast::<u64>()
+            //         .write_unaligned(u64::MAX);
+            // }
+
+
+            // Max size is 2 GB which always fits in one register
+            bar.0 = u32::MAX;
+
+            let size = ((!(bar.addr() << 4)) + 1) as usize;
+
+            let mut alloc = vec![0_u8; size];
+            bar_ptrs[bar_id as usize] = alloc.as_mut_ptr();
+
+            match bar.bar_type().unwrap() {
+                BarType::Bit32 => {
+                    let physaddr: u32 = alloc_map_phys(alloc.as_mut_ptr(), size, true)
+                        .try_into()
+                        .unwrap();
+
+                    bar.set_addr(physaddr >> 4);
+                }
+                BarType::Bit64 => {
+                    let physaddr = alloc_map_phys(alloc.as_mut_ptr(), size, false);
+
+                    // bar.set_addr(((alloc << 32) >> 36) as u32);
+                    // config.bars[bar_id as usize + 1].0 = (alloc >> 36) as u32;
+
+                    unsafe {
+                        addr_of_mut!(*bar).cast::<u64>().write_volatile(physaddr);
+                    }
+                }
+            }
+            std::mem::forget(alloc);
+        }
+
+        let get_ptr = |bar, offset| unsafe { bar_ptrs[bar as usize].byte_add(offset as usize) };
+
         let msiregs = unsafe {
             core::slice::from_raw_parts_mut(
-                ptrs.msi as *mut MsiReg,
+                get_ptr(msi.table.bar(), msi.table.offset()) as *mut MsiReg,
                 (msi.msg_control.size() + 1).into(),
             )
         };
 
-        let ptr = bitvec::ptr::BitPtr::from_mut(unsafe { &mut *ptrs.pba });
+        let ptr = bitvec::ptr::BitPtr::from_mut(unsafe {
+            &mut *get_ptr(msi.pending.bar(), msi.pending.offset())
+        });
         let pending =
             unsafe { bitvec::slice::from_raw_parts_mut(ptr, (msi.msg_control.size() + 1).into()) };
 
@@ -496,16 +556,28 @@ impl<'a> Dev<'a> {
                 pending: pending.unwrap(),
             }),
         };
+
+        let common = common.unwrap();
+
+        let common = unsafe { &mut *get_ptr(common.bar, common.offset).cast::<Common>() };
+        unsafe {
+            addr_of_mut!(common.dev_status)
+                .cast::<u8>()
+                .write_volatile(0);
+        }
+
+        // config.pcie.command = 0x2;
+
+        println!("common ptr{:?}", addr_of!(*common));
+        println!("common: {:?}", common);
         dev.enable_msi(0);
         dev.enable_msi_all();
 
-        let common = unsafe { &mut *ptrs.common.cast::<Common>() };
-        println!("common: {:?}", common);
-
         common.dev_status |= Status::Acknowledge;
         common.dev_status |= Status::Driver;
-        common.dev_feature_select = 0;
+        common.dev_feature_select = 1;
 
+        println!("common: {:?}", common);
         println!("feats: {:?}", common.dev_feature);
 
         common.drv_feature_select = 0;
@@ -515,12 +587,11 @@ impl<'a> Dev<'a> {
 
         common.dev_status |= Status::DriverOk;
 
-        std::mem::forget(vec);
-
-        let factor = unsafe { addr_of!(*notif.unwrap()).offset(1).cast::<u32>().read() };
+        let notif = notif.unwrap();
+        let factor = unsafe { addr_of!(*notif).offset(1).cast::<u32>().read() };
 
         println!("factor: {}", factor);
-        let notif = unsafe { ptrs.notif.byte_add(notif.unwrap().offset as usize % 4096) };
+        let notif = get_ptr(notif.bar, notif.offset);
 
         let mut rec_queue = AbstractQueue::with_queue_id(&mut common.queue, 0, notif, factor);
         rec_queue.avail.idx = 100;
@@ -540,7 +611,7 @@ struct AbstractQueue {
     descs: Vec<Desc>,
     used: Box<Used>,
     avail: Box<Avail>,
-    fuckwit: [*mut u8; 100],
+    uspace_ptrs: [*mut u8; 100],
     last_used: u16,
     notif: *mut u8,
 }
@@ -611,81 +682,11 @@ impl AbstractQueue {
             descs: desc_arr,
             used,
             avail,
-            fuckwit,
+            uspace_ptrs: fuckwit,
             last_used: 0,
             notif,
         }
     }
-}
-
-pub fn setup_logging_with_clock<F>(filter: &str, since_startup: F)
-where
-    F: Fn() -> Instant + Send + Sync + 'static,
-{
-    // Builder::new()
-    //     .format(move |buf, record| {
-    //         let elapsed = since_startup();
-    //         let timestamp = format!("[{elapsed}]");
-    //         if record.target().starts_with("smoltcp::") {
-    //             writeln!(
-    //                 buf,
-    //                 "\x1b[0m{} ({}): {}\x1b[0m",
-    //                 timestamp,
-    //                 record.target().replace("smoltcp::", ""),
-    //                 record.args()
-    //             )
-    //         } else if record.level() == Level::Trace {
-    //             let message = format!("{}", record.args());
-    //             writeln!(
-    //                 buf,
-    //                 "\x1b[37m{} {}\x1b[0m",
-    //                 timestamp,
-    //                 message.replace('\n', "\n             ")
-    //             )
-    //         } else {
-    //             writeln!(
-    //                 buf,
-    //                 "\x1b[32m{} ({}): {}\x1b[0m",
-    //                 timestamp,
-    //                 record.target(),
-    //                 record.args()
-    //             )
-    //         }
-    //     })
-    //     .filter(None, LevelFilter::Trace)
-    //     .parse_filters(filter)
-    //     .parse_env("RUST_LOG")
-    //     .init();
-}
-
-pub fn setup_logging(filter: &str) {
-    setup_logging_with_clock(filter, Instant::now)
-}
-
-use log::{Metadata, Record};
-
-struct SimpleLogger;
-
-impl log::Log for SimpleLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-use log::SetLoggerError;
-
-static LOGGER: SimpleLogger = SimpleLogger;
-
-pub fn init() -> Result<(), SetLoggerError> {
-    log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Trace))
 }
 
 fn main() {
@@ -694,11 +695,6 @@ fn main() {
     //     loop {}
     // }));
     // log
-
-    // #[cfg(feature = "log")]
-    // setup_logging("");
-    // simple_logger::init().unwrap();
-    init().unwrap();
 
     let mut device = Dev::init();
 
