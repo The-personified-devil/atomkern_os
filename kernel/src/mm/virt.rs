@@ -270,6 +270,8 @@ bitflags! {
     }
 }
 
+// TODO: Introduce map_range function
+
 pub fn proper_map_page(
     allocator: &mut crate::frame::Allocator,
     page_table: x86_64::PhysAddr,

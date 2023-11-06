@@ -228,6 +228,7 @@ enum Syscall {
     WakeupThread = 10,
     MapPcie = 12,
     VirtToPhys = 14,
+    MapAllocPhys = 16,
 }
 
 #[derive(Debug, TryFromPrimitive)]
@@ -281,11 +282,13 @@ extern "C" fn syscall_handler_rs(
             loop {}
         }
         Syscall::MapPcie => {
-            let arr = unsafe { *(param1 as *mut [u64; 5]) };
-            crate::pcie::map_virtio_net(arr[0], arr[1], arr[2], arr[3], arr[4]);
+            crate::pcie::map_virtio_net(param1);
         }
         Syscall::VirtToPhys => {
             e = crate::mm::virt::virt_to_phys(VirtAddr::new(param1)).as_u64();
+        }
+        Syscall::MapAllocPhys => {
+            e = crate::pcie::map_alloc_phys(crate::pcie::UserSpaceAddr::new(param1), param2 as usize, param4 != 0).as_u64();
         }
     }
     println!("leaving syscall");

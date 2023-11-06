@@ -1,7 +1,7 @@
 use crate::{mm::virt::MapFlags, phys_offset};
 #[allow(invalid_reference_casting)]
 use crate::{
-    print, println,
+    println,
     xhci::{msi_kekw, Config, HostCaps, OpRegs},
 };
 use arrayvec::ArrayVec;
@@ -10,9 +10,9 @@ use bitvec::prelude::*;
 use core::ptr::{addr_of, addr_of_mut, from_exposed_addr};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use proc_bitfield::*;
-use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr};
 
+// TODO: Move xhci outta here
 #[derive(Debug)]
 #[repr(C)]
 struct PcieConfig {
@@ -75,42 +75,6 @@ pub struct VirtioHeader {
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Common {
-    dev_feature_select: u32,
-    dev_feature: Feature,
-    drv_feature_select: u32,
-    drv_feature: Feature,
-    msix_config: u16,
-    num_queues: u16,
-    dev_status: Status,
-    config_generation: u8,
-
-    select: u16,
-    size: u16,
-    msix_vec: u16,
-    enable: u16,
-    notify_off: u16,
-    desc: u64,
-    driver: u64,
-    device: u64,
-    queues: [Queue; 3],
-}
-
-#[derive(Debug)]
-#[repr(C, packed)]
-struct Queue {
-    select: u16,
-    size: u16,
-    msix_vec: u16,
-    enable: u16,
-    notify_off: u16,
-    desc: u64,
-    driver: u64,
-    device: u64,
-}
-
-#[derive(Debug)]
-#[repr(C)]
 pub struct MsiCaps {
     pub header: CapabilityHeader,
     pub msg_control: MsiControl,
@@ -157,6 +121,7 @@ fn get_bar(
     offset: u64,
 ) -> VirtAddr {
     let bar = &config.bars[index as usize];
+    println!("bar {}", index);
 
     let addr = match bar.bar_type().unwrap() {
         BarType::Bit64 => {
@@ -171,151 +136,81 @@ fn get_bar(
     virt
 }
 
-bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct Status: u8 {
-        const Acknowledge = 1;
-        const Driver = 2;
-        const Failed = 128;
-        const FeaturesOk = 8;
-        const DriverOk = 4;
-        const DeviceNeedsReset = 64;
+// pub fn map_bar(bar: usize) {
+
+// }
+
+pub struct UserSpaceAddr {
+    raw: u64,
+}
+
+// TODO: Make saner and part of the syscall bs
+// i.e. not panicing lmao
+impl UserSpaceAddr {
+    pub fn new(raw: u64) -> Self {
+        if raw > 0xffffffff80000000 {
+            panic!("this is not a userspace addr :angy:");
+        }
+        Self { raw }
+    }
+
+    pub fn as_raw(&self) -> u64 {
+        self.raw
     }
 }
 
-bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct Feature: u32 {
-        const CSum = 1;
-        const GuestCSum = 1 << 1;
-        const CtrlGuestOffload = 1 << 2;
-        const MultiQueue = 1 << 3;
-        const Mac = 1 << 5;
-
-        const GuestTSO4 = 1 << 7;
-        const GuestTSO6 = 1 << 8;
-        const GuestECN = 1 << 9;
-        const GuestUFO = 1 << 10;
-
-        const HostTSO4 = 1 << 11;
-        const HostTSO6 = 1 << 12;
-        const HostECN = 1 << 13;
-        const HostUFO = 1 << 14;
-
-        const MergeRxBuf = 1 << 15;
-        const Status = 1 << 16;
-        const CtrlChan = 1 << 17;
-        const CtrlRx = 1 << 18;
-        const CtrlVlan = 1 << 19;
-        const GuestAnnounce = 1 << 21;
-        const MultiQueueAuto = 1 << 22;
-        const CtrlMac = 1 << 23;
-    }
-}
-
-// TODO: Fix the get_bar having unpredictable effects on addrs
-pub fn map_virtio_net(ptr0: u64, ptr1: u64, ptr2: u64, ptr3: u64, ptr4: u64) {
-    let config = unsafe { &mut *NET.unwrap() };
+// TODO: Introduce below restrictions, i.e. special segments
+pub fn map_alloc_phys(addr: UserSpaceAddr, size: usize, small: bool) -> PhysAddr {
     let mut allocator = crate::interrupt::ALLOC.lock();
     let allocator = allocator.as_mut().unwrap();
 
-    println!("pcie: {:?}", config);
-    println!("bars {:?}", config.bars);
+    let alloc = {
+        if size > 4096 {
+            // allocator.allocate_small_big().unwrap()
+            // TODO: Actually create allocator for this
+            unsafe { PhysAddr::new_unsafe(0x370000000000) }
+        } else if size > 0x200000 {
+            panic!("nuh uh fuck u");
+        } else if small {
+            allocator.allocate_small().unwrap()
+        } else {
+            allocator.allocate().unwrap()
+        }
+    };
 
-    let mut base = unsafe { addr_of_mut!(*config).cast::<CapabilityHeader>() };
-    let mut caps_ptr = unsafe { base.byte_offset(config.capabilities_ptr.into()) };
+    let (page_table, _) = x86_64::registers::control::Cr3::read();
+    let pt_addr = page_table.start_address();
 
-    let mut msi = None;
-    let mut common = None;
-    let mut notif = None;
-    // Int#x
-    let mut isr = None;
-    let mut device = None;
-    // Suboptimal access method
-    let mut pci = None;
-    loop {
-        let caps = unsafe { &*caps_ptr };
-        println!("caps: {:?}", caps);
-        if caps.id == 0x11 {
-            msi = Some(unsafe { &mut *caps_ptr.cast::<MsiCaps>() });
-        }
-        if caps.id == 0x9 {
-            let vendor = unsafe { &*caps_ptr.cast::<VirtioHeader>() };
-            match vendor.cfg_type {
-                1 => common = Some(vendor),
-                2 => notif = Some(vendor),
-                3 => isr = Some(vendor),
-                4 => device = Some(vendor),
-                5 => pci = Some(vendor),
-                _ => unreachable!(),
-            }
-        }
-        if caps.next == 0 {
-            break;
-        }
-        caps_ptr = unsafe { base.byte_offset(caps.next.into()) };
+    for i in 0..size.div_ceil(4096) {
+        crate::mm::virt::proper_map_page(
+            allocator,
+            pt_addr,
+            VirtAddr::new(addr.as_raw() + i as u64 * 4096),
+            PhysAddr::new(alloc.as_u64() + i as u64 * 4096),
+            MapFlags::User | MapFlags::Writable | MapFlags::Readable,
+        );
     }
 
-    println!("common: {:?}", common);
-    println!("notif: {:?}", notif);
-    println!("isr: {:?}", isr);
-    println!("device: {:?}", device);
-    println!("pci: {:?}", pci);
-    println!("msi: {:?}", msi);
+    alloc
+}
 
-    let (page_table, cr3_flags) = x86_64::registers::control::Cr3::read();
+pub fn map_virtio_net(uspace_ptr: u64) {
+    let mut allocator = crate::interrupt::ALLOC.lock();
+    let allocator = allocator.as_mut().unwrap();
+
+    let (page_table, _) = x86_64::registers::control::Cr3::read();
     // println!("start addr: {}", page_table.start_address().as_u64());
     let addr = page_table.start_address();
+
+    let config = unsafe { &mut *NET.unwrap() };
 
     crate::mm::virt::proper_map_page(
         allocator,
         addr,
-        VirtAddr::new(ptr0),
+        VirtAddr::new(uspace_ptr),
         PhysAddr::new(VirtAddr::new(config as *mut _ as u64) - phys_offset()),
         MapFlags::User | MapFlags::Writable | MapFlags::Readable,
     );
-
-    let common = common.unwrap();
-    let virt = get_bar(
-        allocator,
-        config,
-        common.bar as usize,
-        ptr1,
-        common.offset as u64,
-    );
-
-    let common = unsafe { &mut *virt.as_mut_ptr::<Common>() };
-    println!("common: {:?}", common);
-
-    let msi = msi.unwrap();
-
-    let msi_ptr = get_bar(
-        allocator,
-        config,
-        msi.table.bar().into(),
-        ptr2,
-        (msi.table.offset() << 3) as u64,
-    )
-    .as_mut_ptr::<MsiReg>();
-
-    let pba_ptr = get_bar(
-        allocator,
-        config,
-        msi.pending.bar().into(),
-        ptr3,
-        (msi.pending.offset() << 3) as u64,
-    )
-    .as_mut_ptr::<u8>();
-
-
-    let notif_ptr = get_bar(
-        allocator,
-        config,
-        notif.unwrap().bar.into(),
-        ptr4,
-        (notif.unwrap().offset) as u64,
-    )
-    .as_mut_ptr::<u8>();
 }
 
 // TODO: Unfuck this bullshit, potentially make pcie discovery lazy?
